@@ -35,6 +35,11 @@ ENV PATH="/opt/venv/bin:${PATH}" \
     APP_HOST=0.0.0.0 \
     APP_PORT=8000
 WORKDIR /app
+# settings.data_dir defaults to "var" (relative to WORKDIR), so the unprivileged user needs a
+# writable /app/var to run the demo or write an audit log on a plain `docker run`.
+# A tmpfs mounted over this path inherits the mode below but is owned by root, so anything
+# mounting it under a read-only root filesystem must pass uid=10001,gid=10001 (compose does).
+RUN install --directory --owner=10001 --group=10001 --mode=0750 /app/var
 USER 10001:10001
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \

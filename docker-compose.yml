@@ -33,7 +33,9 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=16m
-      - /app/var:size=64m
+      # A tmpfs inherits the mountpoint's mode but is owned by root, so /app/var needs explicit
+      # uid/gid to stay writable for the unprivileged user the image runs as.
+      - /app/var:size=64m,mode=0750,uid=10001,gid=10001
     cap_drop:
       - ALL
     security_opt:
