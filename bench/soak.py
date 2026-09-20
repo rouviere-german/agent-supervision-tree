@@ -2,16 +2,26 @@
 """Fixed-seed fault-injection soak: run the tree under constant chaos and watch it hold.
 
 Usage:
-  uv run python bench/soak.py --seconds 300          # the CI soak job
-  uv run python bench/soak.py --seconds 20 --seed 5  # a quick local check
+  uv run python bench/soak.py --seconds 300           # the CI soak job (time-driven)
+  uv run python bench/soak.py --documents 4000        # fixed volume, for published numbers
+  uv run python bench/soak.py --seconds 20 --seed 5   # a quick local check
 
 The soak feeds documents continuously while crashing workers, injecting poison batches and
-raising the model's fault rate. Every ``--tick`` seconds it classifies the messages that are
-older than the grace period: each one must have reached a sink outcome or the quarantine.
-Anything else is a lost message and fails the run. It also watches RSS, the asyncio task count
-and the ledger invariants, and verifies the audit chain at the end.
+raising the model's fault rate. It classifies the messages that are older than the grace
+period: each one must have reached a sink outcome or the quarantine. Anything else is a lost
+message and fails the run. It also watches RSS, the asyncio task count and the ledger
+invariants, and verifies the audit chain at the end.
 
-Everything is deterministic given ``--seed`` apart from the event loop's own scheduling.
+Two drivers, because they answer different questions:
+
+``--seconds N``   run for a wall-clock window, injecting chaos every ``--tick`` seconds. How
+                  much work fits in the window depends on what else the machine is doing, so
+                  two runs report different volumes; this is the soak CI runs.
+``--documents N`` stop once N documents have been accepted, injecting chaos every
+                  ``--chaos-every`` accepted documents. The workload and the chaos schedule
+                  are then the same on every run at a given seed, which is what makes a
+                  published table reproducible. ``--seconds`` becomes a safety timeout and the
+                  run fails if it hits it.
 """
 
 from __future__ import annotations
@@ -130,7 +140,15 @@ def sample(pipeline: Pipeline, outcomes: Outcomes, *, at: float) -> dict[str, fl
     }
 
 
-async def soak(seconds: float, seed: int, tick: float, workdir: Path) -> dict[str, Any]:
+async def soak(  # noqa: PLR0915 - one linear loop with its setup and its tail
+    seconds: float,
+    seed: int,
+    tick: float,
+    workdir: Path,
+    *,
+    documents_target: int = 0,
+    chaos_every: int = 500,
+) -> dict[str, Any]:
     rng = random.Random(seed)  # reproducible chaos, not cryptography
     audit_path = workdir / "soak-audit.jsonl"
     config = PipelineConfig(
@@ -158,15 +176,21 @@ async def soak(seconds: float, seed: int, tick: float, workdir: Path) -> dict[st
     chunk = 0
     documents = iter(generate_documents(CORPUS_CHUNK, seed=seed, injection_rate=0.05))
 
+    timed_out = False
     async with pipeline:
         loop = asyncio.get_running_loop()
         start = loop.time()
         baseline_tasks = len(asyncio.all_tasks())
         next_tick = start + tick
+        next_chaos_at = chaos_every
+        accepted = 0
         rss_start = rss_mb()
         while True:
             now = loop.time()
+            if documents_target and accepted >= documents_target:
+                break
             if now - start >= seconds:
+                timed_out = bool(documents_target)
                 break
             document = next(documents, None)
             if document is None:
@@ -178,12 +202,17 @@ async def soak(seconds: float, seed: int, tick: float, workdir: Path) -> dict[st
             message_id = pipeline.submit(document)
             if message_id is not None:
                 pending.append((message_id, now))
+                accepted += 1
             else:
                 await asyncio.sleep(0.002)
-            if now < next_tick:
-                continue
-
-            next_tick = now + tick
+            if documents_target:
+                if accepted < next_chaos_at:
+                    continue
+                next_chaos_at += chaos_every
+            else:
+                if now < next_tick:
+                    continue
+                next_tick = now + tick
             inject_chaos(pipeline, rng)
             classify(pipeline, pending, cutoff=now - GRACE_SECONDS, outcomes=outcomes)
             problems.extend(pipeline.ledger.check_invariants())
@@ -201,9 +230,13 @@ async def soak(seconds: float, seed: int, tick: float, workdir: Path) -> dict[st
 
     chain = verify_file(audit_path)
     summary: dict[str, Any] = {
+        "driver": "volume" if documents_target else "time",
+        "documents_target": float(documents_target),
+        "timed_out": timed_out,
         "seconds": seconds,
         "seed": seed,
         "accepted": float(pipeline.accepted_total),
+        "documents_submitted": float(accepted),
         "posted": float(outcomes.posted),
         "denied": float(outcomes.denied),
         "quarantined": float(outcomes.quarantined),
@@ -248,12 +281,25 @@ def failures(summary: dict[str, Any], max_rss_growth_mb: float) -> list[str]:
         problems.append(f"RSS grew by {growth:.1f} MB (limit {max_rss_growth_mb} MB)")
     if not summary["settled_tail"]:
         problems.append("messages in flight at the end did not settle within 60s")
+    if summary["timed_out"]:
+        problems.append(
+            f"the volume soak hit its {summary['seconds']}s safety timeout after "
+            f"{int(summary['accepted'])} of {int(summary['documents_target'])} documents"
+        )
     return problems
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="fault-injection soak")
-    parser.add_argument("--seconds", type=float, default=300.0)
+    parser.add_argument(
+        "--seconds", type=float, default=300.0, help="window, or safety timeout with --documents"
+    )
+    parser.add_argument(
+        "--documents", type=int, default=0, help="stop after N accepted documents (reproducible)"
+    )
+    parser.add_argument(
+        "--chaos-every", type=int, default=500, help="accepted documents between chaos ticks"
+    )
     parser.add_argument("--seed", type=int, default=20260920)
     parser.add_argument("--tick", type=float, default=5.0)
     parser.add_argument("--max-rss-growth-mb", type=float, default=100.0)
@@ -261,7 +307,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     args.workdir.mkdir(parents=True, exist_ok=True)
-    summary = asyncio.run(soak(args.seconds, args.seed, args.tick, args.workdir))
+    summary = asyncio.run(
+        soak(
+            args.seconds,
+            args.seed,
+            args.tick,
+            args.workdir,
+            documents_target=args.documents,
+            chaos_every=args.chaos_every,
+        )
+    )
     write_results(RESULTS, summary)
     samples = summary.pop("samples")
     print_table(

@@ -9,9 +9,14 @@ Usage:
 What is measured:
 
 ``restart_latency``   time from killing a worker to a new incarnation running (p50/p95/p99).
-``delivery``          randomized crash schedules at several fault rates; every accepted message
-                      must end exactly once in a sink or in the quarantine (lost = 0,
-                      duplicate_sink_writes = 0), with the redelivery count reported.
+``delivery``          randomized crash schedules at several fault rates, crashing every actor
+                      class in turn (workers, sink, validator, approval, provider, ingestor and
+                      a mix); every accepted message must end exactly once in a sink or in the
+                      quarantine (lost = 0, duplicate_sink_writes = 0), with the redelivery
+                      count reported. ``delivery_<target>`` holds the per-class breakdown --
+                      the sink column is the one the "no duplicate post" claim rests on, since
+                      a crash between the outbound post and its acknowledgement is what would
+                      produce one.
 ``overload_{1,3,10}x`` open-loop arrivals at multiples of the measured capacity: goodput, p50/p99
                       end-to-end latency, how much was shed, RSS and the peak asyncio task count.
 ``budget_supervised`` a tight budget under faults: spend must never exceed it.
@@ -43,7 +48,16 @@ from agent_supervision_tree.runtime.errors import ActorNotRunningError
 from agent_supervision_tree.workload.actors import build_extraction_request
 from agent_supervision_tree.workload.documents import Document, generate_documents
 from agent_supervision_tree.workload.fake_llm import FaultingFakeProvider, FaultProfile
-from agent_supervision_tree.workload.pipeline import Pipeline, PipelineConfig, worker_path
+from agent_supervision_tree.workload.pipeline import (
+    APPROVAL_PATH,
+    INGESTOR_PATH,
+    PROVIDER_PATH,
+    SINK_PATH,
+    VALIDATOR_PATH,
+    Pipeline,
+    PipelineConfig,
+    worker_path,
+)
 from agent_supervision_tree.workload.schemas import DocumentMessage, validate_extraction
 from benchlib import ROOT, check_thresholds, percentile, print_table, rss_mb, write_results
 
@@ -52,6 +66,18 @@ THRESHOLDS = ROOT / "bench" / "thresholds_supervision.json"
 BUDGET_TOKENS = 10_000_000
 BUDGET_USD_MICROS = 20_000_000
 LATENCY_MS = 2.0
+WORKERS_IN_SCHEDULE = 3
+_WORKER_PATHS = tuple(worker_path(index) for index in range(WORKERS_IN_SCHEDULE))
+_SINGLE_ACTORS = (SINK_PATH, VALIDATOR_PATH, APPROVAL_PATH, PROVIDER_PATH, INGESTOR_PATH)
+CRASH_TARGETS: dict[str, tuple[str, ...]] = {
+    "worker": _WORKER_PATHS,
+    "sink": (SINK_PATH,),
+    "validator": (VALIDATOR_PATH,),
+    "approval": (APPROVAL_PATH,),
+    "provider": (PROVIDER_PATH,),
+    "ingestor": (INGESTOR_PATH,),
+    "mixed": _WORKER_PATHS + _SINGLE_ACTORS,
+}
 
 
 @dataclass
@@ -143,10 +169,12 @@ async def bench_restart_latency(crashes: int) -> dict[str, float]:
 
 
 async def _one_schedule(
-    rng: random.Random, documents: int, fault_rate: float, seed: int
+    rng: random.Random, documents: int, fault_rate: float, seed: int, targets: tuple[str, ...]
 ) -> tuple[int, int, int, int, int]:
     webhook = TimedWebhook()
-    pipeline = pipeline_for(fault_rate, seed, webhook=webhook, workers=3, worker_capacity=3)
+    pipeline = pipeline_for(
+        fault_rate, seed, webhook=webhook, workers=WORKERS_IN_SCHEDULE, worker_capacity=3
+    )
     async with pipeline:
         accepted: list[str] = []
         for document in corpus(documents, seed=seed, injection_rate=0.1, poison_rate=0.1):
@@ -157,8 +185,8 @@ async def _one_schedule(
             accepted.append(message_id)
         for _ in range(rng.randint(1, 4)):
             await asyncio.sleep(rng.uniform(0.0, 0.01))
-            with suppress(ActorNotRunningError):  # the worker may be between incarnations
-                pipeline.system.kill(worker_path(rng.randrange(3)), ExitReason.killed("bench"))
+            with suppress(ActorNotRunningError):  # the actor may be between incarnations
+                pipeline.system.kill(rng.choice(targets), ExitReason.killed("bench"))
         settled = await pipeline.wait_settled(accepted, timeout=30.0)
         if not settled:
             raise RuntimeError("a schedule did not settle within 30s")
@@ -175,31 +203,53 @@ async def _one_schedule(
         return lost, duplicates, redeliveries, quarantined, len(accepted)
 
 
-async def bench_delivery(schedules: int, documents: int) -> dict[str, float]:
-    rng = random.Random(20260920)
-    totals = {"lost": 0, "duplicate_sink_writes": 0, "redeliveries": 0, "quarantined": 0}
-    accepted_total = 0
-    started = time.perf_counter()
-    for index in range(schedules):
-        fault_rate = (0.0, 0.25, 0.5)[index % 3]
-        lost, duplicates, redeliveries, quarantined, accepted = await _one_schedule(
-            rng, documents, fault_rate, seed=1_000 + index
-        )
-        totals["lost"] += lost
-        totals["duplicate_sink_writes"] += duplicates
-        totals["redeliveries"] += redeliveries
-        totals["quarantined"] += quarantined
-        accepted_total += accepted
+def _empty_totals(schedules: int, documents: int) -> dict[str, float]:
     return {
         "schedules": float(schedules),
         "documents_per_schedule": float(documents),
-        "accepted": float(accepted_total),
-        "lost": float(totals["lost"]),
-        "duplicate_sink_writes": float(totals["duplicate_sink_writes"]),
-        "redeliveries": float(totals["redeliveries"]),
-        "quarantined": float(totals["quarantined"]),
-        "seconds": round(time.perf_counter() - started, 2),
+        "accepted": 0.0,
+        "lost": 0.0,
+        "duplicate_sink_writes": 0.0,
+        "redeliveries": 0.0,
+        "quarantined": 0.0,
+        "seconds": 0.0,
     }
+
+
+async def bench_delivery(schedules: int, documents: int) -> dict[str, dict[str, float]]:
+    """Randomized crash schedules, spread evenly over every actor class the tree contains.
+
+    Crashing only the extractor workers would leave out the actor whose crash could actually
+    produce a duplicate outbound post (the sink, between posting and acknowledging), so the
+    campaign rotates through the classes and reports each one separately.
+    """
+    rng = random.Random(20260920)
+    names = list(CRASH_TARGETS)
+    per_target = {name: _empty_totals(0, documents) for name in names}
+    totals = _empty_totals(schedules, documents)
+    started = time.perf_counter()
+    for index in range(schedules):
+        fault_rate = (0.0, 0.25, 0.5)[index % 3]
+        name = names[index % len(names)]
+        target_started = time.perf_counter()
+        lost, duplicates, redeliveries, quarantined, accepted = await _one_schedule(
+            rng, documents, fault_rate, seed=1_000 + index, targets=CRASH_TARGETS[name]
+        )
+        counted = {
+            "accepted": float(accepted),
+            "lost": float(lost),
+            "duplicate_sink_writes": float(duplicates),
+            "redeliveries": float(redeliveries),
+            "quarantined": float(quarantined),
+        }
+        row = per_target[name]
+        row["schedules"] += 1
+        row["seconds"] = round(row["seconds"] + time.perf_counter() - target_started, 2)
+        for key, value in counted.items():
+            row[key] += value
+            totals[key] += value
+    totals["seconds"] = round(time.perf_counter() - started, 2)
+    return {"delivery": totals} | {f"delivery_{name}": per_target[name] for name in names}
 
 
 # --- overload ---------------------------------------------------------------------------------
@@ -243,7 +293,23 @@ async def _drive(
     return offered, accepted, peak_tasks
 
 
-async def _measure_capacity(seconds: float, budget: int = 20_000) -> float:
+async def measure_capacity(seconds: float, runs: int = 3) -> dict[str, float]:
+    """Median of ``runs`` capacity measurements, because one is noisy on a shared machine.
+
+    Throughput moves with whatever else the machine is doing, and every overload target is a
+    multiple of it, so the median of a few runs is what the load levels are scaled from. The
+    spread is reported too, so a reader can see how much the number moves.
+    """
+    samples = [await _one_capacity(seconds) for _ in range(runs)]
+    return {
+        "documents_per_second": round(percentile(samples, 0.50), 1),
+        "min_documents_per_second": round(min(samples), 1),
+        "max_documents_per_second": round(max(samples), 1),
+        "runs": float(runs),
+    }
+
+
+async def _one_capacity(seconds: float, budget: int = 20_000) -> float:
     """Closed-loop throughput: how many documents a second the tree sinks under backpressure.
 
     The corpus is generated *before* the clock starts; generating an invoice costs about as
@@ -407,18 +473,18 @@ async def bench_naive_baseline(
 async def run(args: argparse.Namespace) -> dict[str, dict[str, float]]:
     results: dict[str, dict[str, float]] = {}
     results["restart_latency"] = await bench_restart_latency(args.crashes)
-    results["delivery"] = await bench_delivery(args.schedules, args.documents)
-    capacity = await _measure_capacity(args.seconds)
+    results.update(await bench_delivery(args.schedules, args.documents))
+    capacity = await measure_capacity(args.seconds, args.capacity_runs)
     for multiplier in (1, 3, 10):
         results[f"overload_{multiplier}x"] = await bench_overload(
-            multiplier, capacity, args.seconds, seed=200 + multiplier
+            multiplier, capacity["documents_per_second"], args.seconds, seed=200 + multiplier
         )
     budget = args.budget_usd_micros
     results["budget_supervised"] = await bench_budget_supervised(args.budget_documents, budget)
     results["baseline_naive_10x"] = await bench_naive_baseline(
         args.budget_documents, budget, call_timeout=0.5
     )
-    results["capacity"] = {"documents_per_second": round(capacity, 1)}
+    results["capacity"] = capacity
     return results
 
 
@@ -438,7 +504,28 @@ def report(results: dict[str, dict[str, float]]) -> None:
             ("duplicate sink writes", int(delivery["duplicate_sink_writes"])),
             ("redeliveries (worker 0)", int(delivery["redeliveries"])),
             ("quarantined", int(delivery["quarantined"])),
-            ("measured capacity (docs/s)", results["capacity"]["documents_per_second"]),
+            (
+                f"measured capacity (docs/s, median of {int(results['capacity']['runs'])})",
+                f"{results['capacity']['documents_per_second']} "
+                f"({results['capacity']['min_documents_per_second']}"
+                f"-{results['capacity']['max_documents_per_second']})",
+            ),
+        ],
+    )
+    print()
+    print_table(
+        ("crashed actor", "schedules", "accepted", "lost", "duplicate posts", "quarantined"),
+        [
+            (
+                name,
+                int(results[f"delivery_{name}"]["schedules"]),
+                int(results[f"delivery_{name}"]["accepted"]),
+                int(results[f"delivery_{name}"]["lost"]),
+                int(results[f"delivery_{name}"]["duplicate_sink_writes"]),
+                int(results[f"delivery_{name}"]["quarantined"]),
+            )
+            for name in CRASH_TARGETS
+            if f"delivery_{name}" in results
         ],
     )
     print()
@@ -505,6 +592,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--schedules", type=int, default=120, help="randomized crash schedules")
     parser.add_argument("--documents", type=int, default=8, help="documents per crash schedule")
     parser.add_argument("--seconds", type=float, default=2.0, help="seconds per load level")
+    parser.add_argument(
+        "--capacity-runs", type=int, default=3, help="capacity runs to take the median of"
+    )
     parser.add_argument("--budget-documents", type=int, default=400)
     parser.add_argument("--budget-usd-micros", type=int, default=40_000)
     args = parser.parse_args(argv)

@@ -1,6 +1,13 @@
 {
   "restart_latency": {"p95_ms": {"max": 50}, "p99_ms": {"max": 100}},
   "delivery": {"lost": {"max": 0}, "duplicate_sink_writes": {"max": 0}},
+  "delivery_worker": {"lost": {"max": 0}, "duplicate_sink_writes": {"max": 0}},
+  "delivery_sink": {"lost": {"max": 0}, "duplicate_sink_writes": {"max": 0}},
+  "delivery_validator": {"lost": {"max": 0}, "duplicate_sink_writes": {"max": 0}},
+  "delivery_approval": {"lost": {"max": 0}, "duplicate_sink_writes": {"max": 0}},
+  "delivery_provider": {"lost": {"max": 0}, "duplicate_sink_writes": {"max": 0}},
+  "delivery_ingestor": {"lost": {"max": 0}, "duplicate_sink_writes": {"max": 0}},
+  "delivery_mixed": {"lost": {"max": 0}, "duplicate_sink_writes": {"max": 0}},
   "overload_1x": {"rss_mb": {"max": 300}},
   "overload_3x": {"rss_mb": {"max": 300}},
   "overload_10x": {"rss_mb": {"max": 300}, "shed": {"min": 1}},
