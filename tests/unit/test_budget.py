@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import given
 from hypothesis import strategies as st
 
 from agent_supervision_tree.agentic.budget import BudgetLedger, BudgetLimits
@@ -73,7 +73,6 @@ _operations = st.lists(
 )
 
 
-@settings(max_examples=30)
 @given(_operations)
 def test_persisted_budget_never_resets_or_exceeds_step_limit(
     operations: list[tuple[str, int, int]],

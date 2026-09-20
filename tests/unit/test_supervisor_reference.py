@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from hypothesis import HealthCheck, settings
+from hypothesis import HealthCheck
 from hypothesis import strategies as st
 from hypothesis.stateful import (
     RuleBasedStateMachine,
@@ -35,7 +35,14 @@ from agent_supervision_tree.runtime.reference import (
 )
 from agent_supervision_tree.runtime.supervisor import Supervisor
 from agent_supervision_tree.runtime.system import ActorSystem
-from helpers import CountingActor, FakeClock, actor_child, build_system, wait_for
+from helpers import (
+    CountingActor,
+    FakeClock,
+    actor_child,
+    build_system,
+    scaled_settings,
+    wait_for,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -194,12 +201,10 @@ async def _wait(predicate: object) -> bool:
     return await wait_for(predicate, timeout=2.0)  # type: ignore[arg-type]
 
 
-MACHINE_SETTINGS = settings(
-    max_examples=30,
-    stateful_step_count=12,
-    deadline=None,
-    suppress_health_check=[HealthCheck.too_slow],
-)
+# Depth comes from the hypothesis profile (dev: 60 examples x 15 steps, ci: 200 x 40), so CI
+# searches deeper than a dev run instead of both running one hardcoded budget. Measured on this
+# machine: 250 examples x 40 steps takes 4.5 s, so the flagship claim can afford the full budget.
+MACHINE_SETTINGS = scaled_settings(suppress_health_check=[HealthCheck.too_slow])
 
 
 def test_the_live_tree_matches_the_reference_model() -> None:

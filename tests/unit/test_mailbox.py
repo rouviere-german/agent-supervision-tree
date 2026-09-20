@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import given
 from hypothesis import strategies as st
 from hypothesis.stateful import (
     RuleBasedStateMachine,
@@ -19,6 +19,7 @@ from hypothesis.stateful import (
 from agent_supervision_tree.runtime.errors import MailboxClosedError, MessageTooLargeError
 from agent_supervision_tree.runtime.mailbox import Mailbox
 from agent_supervision_tree.runtime.messages import Envelope
+from helpers import scaled_settings
 
 pytestmark = pytest.mark.unit
 
@@ -179,7 +180,6 @@ async def test_wait_idle_returns_once_nothing_is_queued_or_in_flight() -> None:
     await asyncio.wait_for(waiter, timeout=1)
 
 
-@settings(max_examples=50, deadline=None)
 @given(
     capacity=st.integers(min_value=1, max_value=8),
     operations=st.lists(st.sampled_from(["send", "receive", "ack", "requeue"]), max_size=40),
@@ -261,4 +261,4 @@ class MailboxMachine(RuleBasedStateMachine):
 
 def test_a_mailbox_never_exceeds_its_bound_or_loses_a_message() -> None:
     """Randomized send/receive/ack/redeliver sequences keep the credit invariant."""
-    run_state_machine_as_test(MailboxMachine, settings=settings(max_examples=40, deadline=None))
+    run_state_machine_as_test(MailboxMachine, settings=scaled_settings())

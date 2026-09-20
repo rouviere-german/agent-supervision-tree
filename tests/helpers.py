@@ -10,6 +10,8 @@ import asyncio
 from collections.abc import Callable, Iterable
 from typing import Any
 
+from hypothesis import settings as hypothesis_settings
+
 from agent_supervision_tree.runtime.actor import Actor, ActorContext, ExitReason
 from agent_supervision_tree.runtime.errors import ActorExit, MessageFailed
 from agent_supervision_tree.runtime.messages import Envelope
@@ -28,8 +30,24 @@ __all__ = [
     "build_system",
     "counter",
     "envelope",
+    "scaled_settings",
     "wait_for",
 ]
+
+
+def scaled_settings(*, divisor: int = 1, minimum: int = 4, **overrides: Any) -> hypothesis_settings:
+    """Hypothesis settings derived from the loaded profile, for expensive campaigns.
+
+    A property test that drives a whole event loop costs orders of magnitude more per example
+    than a pure-function one, so it runs a fraction of the profile's budget -- but a fraction
+    that still grows when CI deepens the search, instead of a constant that ignores the profile.
+    """
+    if divisor < 1:
+        raise ValueError("divisor must be at least 1")
+    base = hypothesis_settings.default or hypothesis_settings()
+    return hypothesis_settings(
+        base, max_examples=max(minimum, base.max_examples // divisor), **overrides
+    )
 
 
 class FakeClock:

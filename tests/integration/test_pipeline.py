@@ -13,7 +13,7 @@ from contextlib import suppress
 from typing import Any
 
 import pytest
-from hypothesis import HealthCheck, given, settings
+from hypothesis import HealthCheck, given
 from hypothesis import strategies as st
 
 from agent_supervision_tree.runtime.actor import ExitReason
@@ -29,7 +29,7 @@ from agent_supervision_tree.workload.pipeline import (
     worker_path,
 )
 from agent_supervision_tree.workload.schemas import Extraction
-from helpers import wait_for
+from helpers import scaled_settings, wait_for
 
 pytestmark = pytest.mark.integration
 
@@ -148,9 +148,8 @@ async def test_a_provider_crash_loses_nothing() -> None:
         assert_delivery_invariant(pipeline, accepted)
 
 
-@settings(
-    max_examples=8,
-    deadline=None,
+@scaled_settings(
+    divisor=8,
     suppress_health_check=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture],
 )
 @given(

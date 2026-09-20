@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import given
 from hypothesis import strategies as st
 
 from agent_supervision_tree.workload.documents import (
@@ -67,7 +67,6 @@ def test_text_that_is_not_an_invoice_does_not_parse() -> None:
     assert parse_invoice("INVOICE doc-abcdef\nVendor: acme\n") is None
 
 
-@settings(max_examples=40, deadline=None)
 @given(
     vendor=st.text(
         alphabet=st.characters(min_codepoint=65, max_codepoint=122), min_size=1, max_size=30

@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import given
 from hypothesis import strategies as st
 
 from agent_supervision_tree.agentic.audit import AuditLog, main, verify_file
@@ -102,7 +102,6 @@ def test_tail_truncation_needs_an_anchored_head(tmp_path: Path) -> None:
     assert "head mismatch" in anchored.error
 
 
-@settings(max_examples=40)
 @given(data=st.data())
 def test_any_single_byte_change_is_detected(data: st.DataObject) -> None:
     with tempfile.TemporaryDirectory() as tmp:

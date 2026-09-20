@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import suppress
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import given
 from hypothesis import strategies as st
 from hypothesis.stateful import (
     RuleBasedStateMachine,
@@ -17,6 +17,7 @@ from hypothesis.stateful import (
 
 from agent_supervision_tree.runtime.errors import QuotaExceededError
 from agent_supervision_tree.runtime.ledger import QuotaLedger, Reservation
+from helpers import scaled_settings
 
 pytestmark = pytest.mark.unit
 
@@ -172,7 +173,6 @@ def test_check_invariants_reports_a_ledger_corrupted_by_hand() -> None:
     assert any("tokens authorized over limit" in problem for problem in problems)
 
 
-@settings(max_examples=40, deadline=None)
 @given(
     amounts=st.lists(st.integers(min_value=0, max_value=40), min_size=1, max_size=20),
     leaf=st.sampled_from(["root/pool/w0", "root/pool/w1"]),
@@ -252,4 +252,4 @@ class LedgerMachine(RuleBasedStateMachine):
 
 def test_no_node_ever_exceeds_its_limit_under_random_reservations() -> None:
     """Randomized reserve/settle/release sequences keep spent + reserved <= limit everywhere."""
-    run_state_machine_as_test(LedgerMachine, settings=settings(max_examples=40, deadline=None))
+    run_state_machine_as_test(LedgerMachine, settings=scaled_settings())

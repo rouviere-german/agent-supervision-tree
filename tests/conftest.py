@@ -14,10 +14,14 @@ import pytest
 import structlog
 from hypothesis import HealthCheck, settings
 
-settings.register_profile("dev", max_examples=60, deadline=None)
+# The profile sets how deep every property and stateful test searches: a test that pins its own
+# max_examples or stateful_step_count would ignore it, so CI would search no deeper than a dev
+# run. Expensive campaigns scale their budget with ``helpers.scaled_settings`` instead.
+settings.register_profile("dev", max_examples=60, stateful_step_count=15, deadline=None)
 settings.register_profile(
     "ci",
     max_examples=200,
+    stateful_step_count=40,
     deadline=None,
     derandomize=True,
     suppress_health_check=[HealthCheck.too_slow],
