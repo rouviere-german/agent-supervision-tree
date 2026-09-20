@@ -138,11 +138,22 @@ single source of truth (`lint`, `typecheck`, `test`, `bench`, `soak`, `demo`, `a
 
 ## Results
 
-All numbers below were produced on this machine, with the seeded fault-injecting fake model and
-no network:
+Two kinds of number appear below and they are not equally strong.
+
+**Invariants** (in bold) are what the runtime promises: no accepted message is lost, no message
+is posted twice, spend stays inside the budget, tasks return to baseline, memory stays bounded.
+Every one of them is a threshold CI enforces on every push (`bench/thresholds_supervision.json`),
+and every one reproduced exactly across the runs here.
+
+**Single-run figures** are the throughput, latency, shed and volume columns. They come from one
+run on one laptop and move with whatever else the machine is doing, which is why the capacity
+below is the median of three measurements with its spread, and why the soak is driven by a fixed
+document count instead of a wall clock. They are context for the invariants, not claims. Each
+table names the command that produced it, and its numbers were copied from that run's
+`bench/results/*.json`.
 
 ```
-Windows-10-10.0.19045-SP0, Intel64 Family 6 Model 158 Stepping 10, 6 CPUs, CPython 3.12.14
+Windows-10-10.0.19045-SP0, Intel64 Family 6 Model 158 Stepping 10, GenuineIntel, 6 CPUs, CPython 3.12.14
 (the `machine` block of bench/results/*.json, written by every bench run)
 ```
 
@@ -154,27 +165,40 @@ uv run python bench/bench_supervision.py --check --schedules 1000 --seconds 3
 
 | metric | value |
 |---|---|
-| restart latency p50 / p95 / p99 (ms) | 0.305 / 0.355 / 1.151 |
+| restart latency p50 / p95 / p99 (ms) | 0.32 / 0.473 / 1.56 |
 | crash schedules | 1000 |
 | messages accepted | 8000 |
 | **messages lost** | **0** |
 | **duplicate sink writes** | **0** |
-| redeliveries (worker 0) | 2026 |
-| quarantined (injections, poison, deferred) | 1715 |
-| measured capacity (documents/s) | 451.8 |
+| redeliveries (worker 0) | 1689 |
+| quarantined (injections, poison, deferred) | 1702 |
+| measured capacity (documents/s, median of 3) | 540.6 (521.2-551.6) |
+
+That run takes about 13 minutes here; CI runs the same script at 60 schedules.
 
 Each schedule is a fresh tree that ingests 8 documents (10% carrying a prompt injection, 10%
-poison) at a 0%, 25% or 50% model fault rate, then takes one to four worker crashes at random
-moments. Across all 1000 schedules every accepted message ended exactly once in a sink or in the
-quarantine.
+poison) at a 0%, 25% or 50% model fault rate, then takes one to four crashes at random moments.
+The crashed actor rotates over every class in the tree, because crashing only the extractors
+would leave out the one crash that could actually post twice: the sink, between the outbound
+call and its acknowledgement.
+
+| crashed actor | schedules | accepted | **lost** | **duplicate posts** | quarantined |
+|---|---:|---:|---:|---:|---:|
+| worker | 143 | 1144 | **0** | **0** | 251 |
+| sink | 143 | 1144 | **0** | **0** | 249 |
+| validator | 143 | 1144 | **0** | **0** | 254 |
+| approval | 143 | 1144 | **0** | **0** | 238 |
+| provider | 143 | 1144 | **0** | **0** | 233 |
+| ingestor | 143 | 1144 | **0** | **0** | 247 |
+| mixed | 142 | 1136 | **0** | **0** | 230 |
 
 Open-loop arrivals at multiples of the measured capacity, three seconds per level:
 
-| load | target/s | offered/s | accepted | shed (429) | goodput/s | p50 ms | p99 ms | RSS MB | peak asyncio tasks |
+| load | target/s | offered/s | accepted | shed (429) | goodput/s | p50 ms | p99 ms | **RSS MB** | **peak asyncio tasks** |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1x | 451.8 | 449.3 | 1348 | 0 | 449.3 | 33.53 | 117.44 | 58.6 | 17 |
-| 3x | 1355.3 | 1348.0 | 1564 | 2480 | 521.3 | 408.23 | 458.60 | 58.9 | 17 |
-| 10x | 4517.6 | 4493.3 | 1495 | 11985 | 498.3 | 430.14 | 483.60 | 66.0 | 17 |
+| 1x | 540.6 | 537.7 | 1613 | 0 | 537.7 | 38.4 | 82.7 | **64.5** | **17** |
+| 3x | 1621.8 | 1613.0 | 1708 | 3131 | 569.3 | 375.14 | 401.78 | **63.9** | **17** |
+| 10x | 5406.0 | 5377.0 | 1623 | 14508 | 541.0 | 393.93 | 437.44 | **67.1** | **17** |
 
 At ten times capacity the tree keeps its goodput, sheds the rest at the ingress, and neither
 memory nor the task count grows: the queue is the bound, not the heap.
@@ -185,29 +209,34 @@ The same offered work, the same fake provider at a 30% fault rate, the same 40,0
 budget. The naive baseline is what most agent code looks like: `asyncio.gather` over the
 documents, three retries each, spend counted after the call returns.
 
-| run | limit (uUSD) | spent (uUSD) | over budget | lost messages | peak asyncio tasks |
+| run | limit (uUSD) | spent (uUSD) | **over budget** | **lost messages** | peak asyncio tasks |
 |---|---:|---:|---:|---:|---:|
-| supervised (reserve then settle) | 40000 | 37044 | **0** | **0** | 17 (bounded by the tree) |
-| naive gather + retry | 40000 | 748706 | 708706 | 27 | 401 (one per document) |
+| supervised (reserve then settle) | 40000 | 37276 | **0** | **0** | 17 (bounded by the tree) |
+| naive gather + retry | 40000 | 761950 | 721950 | 32 | 401 (one per document) |
 
-The naive run spends about 19 times its budget before anything notices, and the 27 messages
-whose retries ran out are simply gone: there is no quarantine to put them in.
+The naive run spends about 19 times its budget before anything notices, and the 32 messages
+whose retries ran out are simply gone: there is no quarantine to put them in. The supervised
+run's cap holds because the reported usage stays inside the reservation; a provider that bills
+over one is caught by the overshoot path instead, which has its own tests (CLAIMS rows 20 and 21)
+rather than being assumed impossible.
 
 ### Soak
 
 ```bash
-uv run python bench/soak.py --seconds 60
+uv run python bench/soak.py --documents 6000
 ```
 
-Sixty seconds of continuous ingress while a worker is killed every five seconds, the model's
-fault rate moves between 10% and 50% and poison batches keep arriving:
+6000 documents of continuous ingress while a worker is killed every 500 accepted documents, the
+model's fault rate moves between 10% and 50% and poison batches keep arriving:
 
-| accepted | posted | quarantined | lost | duplicate posts | restarts | escalations | RSS start -> end | asyncio tasks start -> end |
+| accepted | posted | quarantined | **lost** | **duplicate posts** | restarts | **escalations** | **RSS start -> end** | **asyncio tasks start -> end** |
 |---:|---:|---:|---:|---:|---:|---:|---|---|
-| 4593 | 3034 | 1559 | **0** | **0** | 11 | 0 | 46.9 -> 57.8 MB | 14 -> 14 |
+| 6000 | 2051 | 3949 | **0** | **0** | 12 | **0** | **47.5 -> 64.9 MB** | **14 -> 14** |
 
-The audit chain verified at the end and the shutdown returned exit code 0. CI runs the same
-script for 300 seconds with a fixed seed.
+The audit chain verified against its anchor at the end and the shutdown returned exit code 0.
+How the accepted documents split between posted and quarantined still moves between runs, because
+call timeouts and message deadlines are wall-clock; that is why only the bold columns are claims.
+CI runs the same script time-driven for 300 seconds with a fixed seed.
 
 ### Micro-benchmarks
 
@@ -217,26 +246,25 @@ uv run python bench/bench_baseline.py --check
 
 | benchmark | runs | p50 (us) | p95 (us) |
 |---|---:|---:|---:|
-| redact_text_1kb | 2000 | 341.8 | 454.4 |
-| rate_limiter_check | 20000 | 1.8 | 2.0 |
-| llm_request_sha256_10_messages | 2000 | 97.6 | 142.0 |
-| audit_append_fsync | 200 | 8235.5 | 13460.1 |
-| audit_verify_1000_entries | 10 | 33155.7 | 34896.5 |
-| envelope_create | 5000 | 15.8 | 18.8 |
-| mailbox_send_receive_ack | 5000 | 31.5 | 35.8 |
-| ledger_reserve_settle | 20000 | 4.3 | 5.0 |
-| supervision_decision_one_for_all_8 | 5000 | 8.8 | 10.3 |
+| audit_append_fsync | 200 | 7044.4 | 8535.8 |
+| audit_verify_1000_entries | 10 | 32022.4 | 32247.2 |
+| envelope_create | 5000 | 15.3 | 15.7 |
+| ledger_reserve_settle | 20000 | 4.9 | 5.0 |
+| llm_request_sha256_10_messages | 2000 | 96.9 | 107.8 |
+| mailbox_send_receive_ack | 5000 | 30.3 | 31.7 |
+| rate_limiter_check | 20000 | 1.8 | 1.9 |
+| redact_text_1kb | 2000 | 341.0 | 386.1 |
+| supervision_decision_one_for_all_8 | 5000 | 8.9 | 10.6 |
 
-A message hop costs about 32 us of runtime overhead and a budget reservation about 4.3 us, which
+A message hop costs about 30 us of runtime overhead and a budget reservation about 5 us, which
 is why the supervision machinery does not show up next to a model call.
 
 CI runs both scripts with the thresholds in `bench/thresholds.json` and
-`bench/thresholds_supervision.json` (`p95` restart latency under 50 ms, zero lost messages, zero
-duplicate sink writes, zero over-budget spend, RSS under 300 MB, shedding at 10x), at smaller
-sizes so a shared runner finishes quickly, plus a five-minute fixed-seed soak
-(`bench/soak.py`). The numbers above come from the larger local run with the command shown
-above each table.
-
+`bench/thresholds_supervision.json` (`p95` restart latency under 50 ms, zero lost messages,
+zero duplicate sink writes per crashed actor class, zero over-budget spend, RSS under
+300 MB, shedding at 10x), at smaller sizes so a shared runner finishes quickly, plus a
+five-minute fixed-seed soak (`bench/soak.py`). The numbers above come from the larger local
+run with the command shown above each table.
 ## Security
 
 The controls are enforced by the runtime, not by prompting. Full STRIDE analysis in
@@ -305,6 +333,12 @@ Runbook for the quarantine: [docs/RUNBOOK_QUARANTINE.md](docs/RUNBOOK_QUARANTINE
   windows at a 0% model fault rate, so the whole evaluation finishes in minutes on a laptop.
   Behaviour at 25% and 50% fault rates is measured by the delivery benchmark and by the
   five-minute soak, which moves the fault rate while it runs.
+- **Reproducible throughput.** The invariants reproduce exactly and are enforced by threshold
+  files; the throughput, latency, shed and posted/quarantined columns do not. They are one run on
+  one machine and they move with whatever else it is doing -- capacity measured here varied by
+  about 20% across runs, and every overload target is a multiple of it. Benchmarking this runtime
+  against a machine-independent baseline is not something a laptop can do honestly, so the README
+  marks those columns instead of pretending otherwise.
 
 ## Repository layout
 

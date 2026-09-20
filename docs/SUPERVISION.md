@@ -34,7 +34,7 @@ spec is deleted, so it is not started again.
 |---|---|---|---|---|
 | Behaviour raises `MessageFailed` (malformed model output, schema violation) | The runner around `receive` | The actor keeps running; the message is requeued at the tail with `attempt + 1` | Redelivered until `max_attempts`, then quarantined | `ast_message_failures_total`, `ast_redeliveries_total` |
 | Behaviour raises `MessageFailed(retryable=False)` (refusal, invalid document) | The runner | The actor keeps running | Quarantined at once | `ast_quarantine_total{reason}` |
-| Behaviour raises any other exception | The runner | The incarnation exits `error`; the supervisor decides | Pushed back to the head of the mailbox with `attempt + 1`; quarantined if the attempts are used up | `ast_child_exits_total`, `ast_restarts_total` |
+| Behaviour raises any other exception, including `SystemExit` from a third-party handler | The runner | The incarnation exits `error`; the supervisor decides | Pushed back to the head of the mailbox with `attempt + 1`; quarantined if the attempts are used up | `ast_child_exits_total`, `ast_restarts_total` |
 | A task the actor spawned fails | `ActorContext.spawn` done-callback | The actor exits `error:spawned_task_failed` (no failure is lost in the background) | As above | `ast_child_exits_total` |
 | `on_start` raises or takes longer than `start_timeout` | The runner | The incarnation exits `error`; a restart loop that exceeds the intensity escalates | Nothing was dequeued yet | `ast_restarts_total` |
 | Deadline passes before the message is handled | The runner, before `receive` | The actor keeps running | Quarantined as `deadline_exceeded` | `ast_quarantine_total{reason="deadline_exceeded"}` |
@@ -61,7 +61,12 @@ The mechanisms behind that:
 1. A mailbox credit is returned only on *acknowledgement*, and a message is acknowledged only
    after `receive` returns. A crash therefore never acknowledges anything.
 2. The runner holds unacknowledged messages in its in-flight table and hands them back to the
-   mailbox (head of the queue, in order) when the incarnation ends.
+   mailbox (head of the queue, in order) when the incarnation ends. That exit path is a
+   `finally` block, and the runner catches `BaseException`, so a behaviour that raises
+   `SystemExit` -- `sys.exit()` inside a third-party tool handler -- is contained like any other
+   crash instead of stranding the message and its credit. The single exception is
+   `KeyboardInterrupt`: the exit path runs, and then it is re-raised so an operator's interrupt
+   still reaches the process.
 3. Attempts are counted per message. When they run out, the message moves to the quarantine
    instead of circling forever.
 4. The sink deduplicates by message id, so a redelivery after a crash cannot post twice.

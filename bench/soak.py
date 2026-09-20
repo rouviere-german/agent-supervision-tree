@@ -232,6 +232,7 @@ async def soak(  # noqa: PLR0915 - one linear loop with its setup and its tail
     summary: dict[str, Any] = {
         "driver": "volume" if documents_target else "time",
         "documents_target": float(documents_target),
+        "chaos_every": float(chaos_every) if documents_target else 0.0,
         "timed_out": timed_out,
         "seconds": seconds,
         "seed": seed,
