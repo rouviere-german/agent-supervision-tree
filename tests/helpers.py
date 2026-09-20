@@ -17,10 +17,12 @@ from agent_supervision_tree.runtime.supervisor import ActorSpec, ChildSpec, Supe
 from agent_supervision_tree.runtime.system import ActorSystem
 
 __all__ = [
+    "BaseCrashingActor",
     "BlockingActor",
     "CountingActor",
     "CrashingActor",
     "FakeClock",
+    "HardCrash",
     "SlowStartActor",
     "actor_child",
     "build_system",
@@ -116,6 +118,30 @@ class SlowStartActor(Actor):
 
     async def receive(self, envelope: Envelope, ctx: ActorContext) -> None:
         return None
+
+
+class HardCrash(BaseException):
+    """A ``BaseException`` a behavior can raise: ``except Exception`` does not catch it."""
+
+
+class BaseCrashingActor(Actor):
+    """Raises a ``BaseException`` from ``receive`` while the message is still in flight.
+
+    Third-party tool handlers and SDKs raise ``SystemExit`` (``sys.exit()``) and other
+    ``BaseException`` subclasses; the runner must contain them like any other failure.
+    """
+
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+        self.handled: list[str] = []
+        self.stops: list[ExitReason] = []
+
+    async def receive(self, envelope: Envelope, ctx: ActorContext) -> None:
+        self.handled.append(envelope.id)
+        raise self.error
+
+    async def on_stop(self, reason: ExitReason, ctx: ActorContext) -> None:
+        self.stops.append(reason)
 
 
 class BlockingActor(Actor):

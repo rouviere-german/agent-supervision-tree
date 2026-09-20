@@ -257,11 +257,18 @@ class ActorRunner:
     # --- the loop ------------------------------------------------------------------------
 
     async def run(self) -> ExitReason:
-        """Run the incarnation to completion and return why it ended (never raises)."""
+        """Run the incarnation to completion and return why it ended.
+
+        Only ``KeyboardInterrupt`` leaves this method, and only after the exit path has run: an
+        operator's interrupt must still reach the process. Every other failure -- including
+        ``SystemExit`` from a third-party tool handler that calls ``sys.exit()`` -- becomes an
+        :class:`ExitReason` the supervisor decides on, because a failure that skipped the exit
+        path would strand the in-flight message and its mailbox credit.
+        """
         self._task = asyncio.current_task()
         actor: Actor | None = None
         ctx = ActorContext(self, self._system)
-        reason: ExitReason
+        reason = ExitReason.shutdown("never_started")
         try:
             actor = self._factory()
             async with asyncio.timeout(self._start_timeout):
@@ -277,6 +284,16 @@ class ActorRunner:
             reason = self._exit_override or ExitReason.shutdown()
         except Exception as exc:  # noqa: BLE001 - every failure becomes an exit reason
             reason = self._exit_override or ExitReason.failed(exc)
+        except BaseException as exc:  # SystemExit and friends are contained, not propagated
+            reason = self._exit_override or ExitReason.failed(exc)
+            if isinstance(exc, KeyboardInterrupt):
+                raise  # after the exit path below: an operator's interrupt still reaches the loop
+        finally:
+            reason = await self._exit(actor, ctx, reason)
+        return reason
+
+    async def _exit(self, actor: Actor | None, ctx: ActorContext, reason: ExitReason) -> ExitReason:
+        """Release the incarnation's resources and announce the exit. Runs on every exit path."""
         self._exiting = True
         self.started.set()
         await self._cancel_spawned()
@@ -383,5 +400,7 @@ class ActorRunner:
         except asyncio.CancelledError:
             if self._task is not None:
                 self._task.uncancel()
-        except Exception as exc:  # noqa: BLE001 - a failing hook must not mask the exit reason
+        except BaseException as exc:  # a failing hook must not mask the exit reason
             _log.warning("on_stop_failed", actor=self.path, error_type=type(exc).__name__)
+            if isinstance(exc, KeyboardInterrupt):
+                raise

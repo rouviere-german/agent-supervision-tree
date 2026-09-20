@@ -17,7 +17,16 @@ from agent_supervision_tree.runtime.errors import (
 )
 from agent_supervision_tree.runtime.messages import Envelope
 from agent_supervision_tree.runtime.system import EXIT_SOFTWARE, ActorSystem
-from helpers import BlockingActor, CountingActor, actor_child, build_system, counter, wait_for
+from helpers import (
+    BaseCrashingActor,
+    BlockingActor,
+    CountingActor,
+    HardCrash,
+    actor_child,
+    build_system,
+    counter,
+    wait_for,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -367,3 +376,67 @@ async def test_each_receive_opens_a_span_in_the_message_trace_context() -> None:
     assert attributes["message.id"] == envelope.id
     assert attributes["message.kind"] == "test.message"
     assert otel_trace.get_current_span().get_span_context().trace_id != trace_id
+
+
+# --- BaseException containment ------------------------------------------------------------
+
+
+def _hard_crash_system(error: BaseException, actors: list[BaseCrashingActor]) -> ActorSystem:
+    def factory() -> BaseCrashingActor:
+        actor = BaseCrashingActor(error)
+        actors.append(actor)
+        return actor
+
+    return build_system(
+        [actor_child("hard", factory, capacity=4, max_attempts=3)],
+        max_restarts=50,
+        max_seconds=30.0,
+    )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [SystemExit(3), HardCrash("hard crash")],
+    ids=["system_exit", "base_exception"],
+)
+async def test_a_base_exception_in_a_behavior_does_not_lose_the_message(
+    error: BaseException,
+) -> None:
+    """``sys.exit()`` in a handler must be contained like any other crash, not lose the message."""
+    actors: list[BaseCrashingActor] = []
+    system = _hard_crash_system(error, actors)
+    await system.start()
+    try:
+        envelope = Envelope.create("test.message", {"n": 1})
+        assert system.mailbox("root/hard").try_send(envelope)
+        assert await wait_for(lambda: envelope.id in system.quarantine, timeout=5)
+        mailbox = system.mailbox("root/hard")
+        # The exit path ran: the credit came back and nothing is still held in flight.
+        assert mailbox.depth + mailbox.inflight + mailbox.credits == mailbox.capacity
+        assert mailbox.credits == mailbox.capacity
+        # Every attempt reached a fresh incarnation, and each one's on_stop ran.
+        assert [actor.handled for actor in actors[:3]] == [[envelope.id]] * 3
+        assert [stop.kind for stop in actors[0].stops] == ["error"]
+    finally:
+        await system.stop(timeout=2)
+
+
+async def test_base_exception_crashes_do_not_wedge_the_mailbox_at_zero_credits() -> None:
+    """Capacity worth of hard crashes must not permanently consume the mailbox's credits."""
+    actors: list[BaseCrashingActor] = []
+    system = _hard_crash_system(SystemExit(1), actors)
+    await system.start()
+    try:
+        mailbox = system.mailbox("root/hard")
+        sent = [Envelope.create("test.message", {"n": index}) for index in range(mailbox.capacity)]
+        for envelope in sent:
+            assert mailbox.try_send(envelope)
+        assert await wait_for(
+            lambda: all(envelope.id in system.quarantine for envelope in sent), timeout=10
+        )
+        assert mailbox.credits == mailbox.capacity
+        assert await wait_for(lambda: system.resolve("root/hard").running, timeout=5)
+        # The slot still accepts work after all those crashes.
+        assert mailbox.try_send(Envelope.create("test.message", {"n": 99}))
+    finally:
+        await system.stop(timeout=2)
