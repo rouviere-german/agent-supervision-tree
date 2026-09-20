@@ -19,6 +19,8 @@ from agent_supervision_tree.agentic.providers.base import (
     LLMResponse,
     Usage,
 )
+from agent_supervision_tree.agentic.tokens import estimate_tokens, simulate_usage_tokens
+from agent_supervision_tree.core.canonical import canonical_json
 from agent_supervision_tree.runtime.actor import Actor, ActorContext, ExitReason
 from agent_supervision_tree.runtime.breaker import CircuitBreaker
 from agent_supervision_tree.runtime.errors import (
@@ -29,6 +31,7 @@ from agent_supervision_tree.runtime.errors import (
 from agent_supervision_tree.runtime.ledger import QuotaLedger
 from agent_supervision_tree.runtime.messages import Envelope
 from agent_supervision_tree.runtime.provider_actor import (
+    AsyncLLMProvider,
     FallbackPolicy,
     ProviderActor,
     ProviderOutcome,
@@ -118,7 +121,7 @@ def make_ledger(tokens: int = 10_000, usd: int = 10_000) -> QuotaLedger:
 
 
 async def start_system(
-    provider: ScriptedProvider,
+    provider: AsyncLLMProvider,
     ledger: QuotaLedger,
     *,
     results: list[object],
@@ -532,3 +535,72 @@ async def test_threaded_provider_adapts_a_synchronous_client() -> None:
         LLMRequest(messages=(ChatMessage.user("hi"),), max_tokens=16)
     )
     assert response.usage.total_tokens == 30
+
+
+class OvershootingProvider:
+    """Reports more usage than the request allowed: an unreliable or hostile provider."""
+
+    name = "overshooting"
+
+    def __init__(self, output_tokens: int) -> None:
+        self.output_tokens = output_tokens
+        self.requests: list[LLMRequest] = []
+
+    async def acomplete(self, request: LLMRequest) -> LLMResponse:
+        self.requests.append(request)
+        return LLMResponse(
+            model="claude-sonnet-5",
+            stop_reason="end_turn",
+            text="{}",
+            parsed={},
+            usage=Usage(input_tokens=20, output_tokens=self.output_tokens),
+        )
+
+
+async def test_a_provider_that_bills_more_than_it_was_allowed_is_audited_and_cuts_off(
+    results: list[object],
+) -> None:
+    """The overshoot path is live: spend above the hold is counted, audited and acted on."""
+    provider = OvershootingProvider(output_tokens=1_000)
+    ledger = make_ledger(tokens=500, usd=10_000)
+    system = await start_system(
+        provider,
+        ledger,
+        results=results,
+        fallback=FallbackPolicy(chain=(), allow_defer=True),
+        ttl=2.0,
+    )
+    try:
+        call(system)
+        assert await wait_for(lambda: bool(results))
+        assert isinstance(results[0], ProviderOutcome)
+        assert results[0].status == "ok"
+        node = ledger.node(CALLER_PATH)
+        assert node.spent_tokens == 1_020  # reported usage, not the hold: nothing is hidden
+        assert node.overshoot_total == 1
+        assert node.overshoot_tokens > 0
+        assert system.audit.count("budget.overshoot") == 1
+        # The ledger authorized only what fitted, so its own invariant still holds ...
+        assert ledger.check_invariants() == []
+        assert node.authorized_tokens <= node.limit_tokens
+        assert ledger.overshoots() == ["root", CALLER_PATH]
+        # ... and the overshoot immediately stops the next call: a cost breaker, not a surprise.
+        call(system, "second")
+        assert await wait_for(lambda: len(results) == 2)
+        assert isinstance(results[1], ProviderOutcome)
+        assert results[1].status == "deferred"
+        assert results[1].reason == "cost_breaker_open"  # the root node is exhausted
+        assert len(provider.requests) == 1
+    finally:
+        await system.stop(timeout=2)
+
+
+async def test_the_reservation_is_larger_than_the_usage_a_realistic_provider_reports() -> None:
+    """The reservation must not be the same expression as the reported usage."""
+    request = LLMRequest(
+        messages=(ChatMessage.user("invoice 4711, total 12.50 EUR, due 2026-01-31"),),
+        role="extractor",
+        max_tokens=64,
+    )
+    rendered = canonical_json(request.model_dump(mode="json"))
+    assert estimate_tokens(rendered) > simulate_usage_tokens(rendered)

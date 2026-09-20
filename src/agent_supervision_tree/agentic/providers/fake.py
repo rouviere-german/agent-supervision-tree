@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 import random
 import re
 from collections.abc import Callable, Sequence
@@ -18,6 +17,7 @@ from agent_supervision_tree.agentic.providers.base import (
     ToolUseBlock,
     Usage,
 )
+from agent_supervision_tree.agentic.tokens import simulate_usage_tokens
 from agent_supervision_tree.core.canonical import canonical_json
 
 __all__ = [
@@ -27,18 +27,12 @@ __all__ = [
     "PolicyResult",
     "ScriptedPolicy",
     "SeededChoicePolicy",
-    "estimate_tokens",
 ]
 
 PolicyResult = LLMResponse | ProviderError
 Policy = Callable[[LLMRequest, random.Random, int], PolicyResult]
 
 _INJECTED_CALL = re.compile(r"CALL_TOOL\s+([A-Za-z0-9_-]{1,64})\s+(\{.*\})")
-
-
-def estimate_tokens(text: str) -> int:
-    """Rough, deterministic token estimate (4 characters per token, at least 1)."""
-    return max(1, math.ceil(len(text) / 4))
 
 
 class ScriptedPolicy:
@@ -130,7 +124,8 @@ class FakeProvider:
                 canonical_json(call.arguments) for call in result.tool_calls
             )
             usage = Usage(
-                input_tokens=estimate_tokens(prompt), output_tokens=estimate_tokens(output)
+                input_tokens=simulate_usage_tokens(prompt),
+                output_tokens=simulate_usage_tokens(output),
             )
             result = result.model_copy(update={"usage": usage})
         return result

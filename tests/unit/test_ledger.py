@@ -108,6 +108,32 @@ def test_settling_above_the_hold_is_recorded_honestly_and_counted() -> None:
     assert ledger.node("root/pool/w0").overshoot_total == 1
 
 
+def test_an_overshoot_is_accounted_separately_and_shrinks_the_remainder() -> None:
+    """Spend above the hold is real spend: it is counted, and later calls have less to reserve."""
+    ledger = build_ledger(tokens=100, usd=100)
+    reservation = ledger.reserve("root/pool/w0", tokens=10, usd_micros=10)
+    assert ledger.settle(reservation, tokens=30, usd_micros=40) is False
+    root = ledger.node("root")
+    assert (root.spent_tokens, root.spent_usd_micros) == (30, 40)
+    assert (root.overshoot_tokens, root.overshoot_usd_micros) == (20, 30)
+    assert (root.remaining_tokens, root.remaining_usd_micros) == (70, 60)
+    # The ledger only ever authorized the 10 it held, which is the invariant it can guarantee.
+    assert (root.authorized_tokens, root.authorized_usd_micros) == (10, 10)
+    assert ledger.check_invariants() == []
+    assert ledger.overshoots() == ["root", "root/pool", "root/pool/w0"]
+
+
+def test_a_provider_overshoot_past_the_limit_exhausts_the_node() -> None:
+    """Once reported usage passes the limit the node is exhausted: the cost breaker trips."""
+    ledger = build_ledger(tokens=100, usd=100)
+    reservation = ledger.reserve("root/pool/w0", tokens=10, usd_micros=10)
+    ledger.settle(reservation, tokens=140, usd_micros=140)
+    assert ledger.exhausted("root")
+    assert ledger.check_invariants() == []
+    with pytest.raises(QuotaExceededError):
+        ledger.reserve("root/pool/w0", tokens=1, usd_micros=1)
+
+
 def test_a_reservation_can_only_be_closed_once() -> None:
     ledger = build_ledger()
     reservation = ledger.reserve("root/pool/w0", tokens=10, usd_micros=10)
@@ -143,7 +169,7 @@ def test_check_invariants_reports_a_ledger_corrupted_by_hand() -> None:
     ledger.node("root").spent_tokens = 10_000
     problems = ledger.check_invariants()
     assert any("negative reservation" in problem for problem in problems)
-    assert any("tokens over limit" in problem for problem in problems)
+    assert any("tokens authorized over limit" in problem for problem in problems)
 
 
 @settings(max_examples=40, deadline=None)
@@ -167,7 +193,8 @@ def test_spend_never_exceeds_any_limit_for_any_amount_sequence(
             ledger.settle(reservation, tokens=reservation.tokens, usd_micros=reservation.usd_micros)
         assert ledger.check_invariants() == []
     root = ledger.node("root")
-    assert root.spent_tokens + root.reserved_tokens <= root.limit_tokens
+    assert root.authorized_tokens <= root.limit_tokens
+    assert root.overshoot_tokens == 0  # every settlement matched its hold exactly
 
 
 def _reserve_or_none(ledger: QuotaLedger, path: str, amount: int) -> Reservation | None:
@@ -185,6 +212,7 @@ class LedgerMachine(RuleBasedStateMachine):
         self.ledger = build_ledger(tokens=150, usd=150)
         self.open: list[Reservation] = []
         self.settled_tokens = 0
+        self.overshoot_tokens = 0
 
     @rule(
         leaf=st.sampled_from(["root", "root/pool", "root/pool/w0", "root/pool/w1"]),
@@ -196,12 +224,13 @@ class LedgerMachine(RuleBasedStateMachine):
             self.open.append(refused)
 
     @precondition(lambda self: bool(self.open))
-    @rule(index=st.integers(min_value=0), spend=st.integers(min_value=0, max_value=60))
+    @rule(index=st.integers(min_value=0), spend=st.integers(min_value=0, max_value=90))
     def settle(self, index: int, spend: int) -> None:
+        """Settle with any reported usage, including more than was held (a lying provider)."""
         reservation = self.open.pop(index % len(self.open))
-        capped = min(spend, reservation.tokens)
-        self.ledger.settle(reservation, tokens=capped, usd_micros=capped)
-        self.settled_tokens += capped
+        self.ledger.settle(reservation, tokens=spend, usd_micros=spend)
+        self.settled_tokens += spend
+        self.overshoot_tokens += max(0, spend - reservation.tokens)
 
     @precondition(lambda self: bool(self.open))
     @rule(index=st.integers(min_value=0))
@@ -210,12 +239,15 @@ class LedgerMachine(RuleBasedStateMachine):
 
     @invariant()
     def limits_hold(self) -> None:
+        """The ledger never authorizes more than a limit, and it hides no reported spend."""
         assert self.ledger.check_invariants() == []
         for path in self.ledger.paths():
             node = self.ledger.node(path)
-            assert node.spent_tokens + node.reserved_tokens <= node.limit_tokens
-            assert node.spent_usd_micros + node.reserved_usd_micros <= node.limit_usd_micros
-        assert self.ledger.node("root").spent_tokens == self.settled_tokens
+            assert node.authorized_tokens <= node.limit_tokens
+            assert node.authorized_usd_micros <= node.limit_usd_micros
+        root = self.ledger.node("root")
+        assert root.spent_tokens == self.settled_tokens
+        assert root.overshoot_tokens == self.overshoot_tokens
 
 
 def test_no_node_ever_exceeds_its_limit_under_random_reservations() -> None:

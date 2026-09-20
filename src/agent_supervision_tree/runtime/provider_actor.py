@@ -34,7 +34,7 @@ from typing import Literal, Protocol, runtime_checkable
 from agent_supervision_tree.agentic.errors import ProviderError, ProviderRateLimitedError
 from agent_supervision_tree.agentic.pricing import cost_usd_micros
 from agent_supervision_tree.agentic.providers.base import LLMProvider, LLMRequest, LLMResponse
-from agent_supervision_tree.agentic.providers.fake import estimate_tokens
+from agent_supervision_tree.agentic.tokens import estimate_tokens
 from agent_supervision_tree.core.canonical import canonical_json
 from agent_supervision_tree.runtime.actor import Actor, ActorContext
 from agent_supervision_tree.runtime.breaker import Bulkhead, CircuitBreaker

@@ -28,10 +28,18 @@ works in two phases:
    Settling above the reservation is recorded honestly and counted as an overshoot rather than
    hidden.
 
-Because reservations are held until settlement, the invariant `spent + reserved <= limit` holds
-at every node at every moment, whatever the concurrency. Calls that are billed even though they
-failed (truncations, refusals after partial output) are settled, not released, so failures are
-paid for in the ledger too.
+Because reservations are held until settlement, the ledger never *authorizes* more than a limit:
+`spent + reserved - overshoot <= limit` at every node at every moment, whatever the concurrency,
+where `overshoot` is the part of a settlement that exceeded its own hold. Calls that are billed
+even though they failed (truncations, refusals after partial output) are settled, not released,
+so failures are paid for in the ledger too.
+
+The estimate is a heuristic, not a proof, so the guarantee is stated with its assumption: **while
+reported usage stays within the reservation, spend never passes a limit.** A provider that bills
+above what the request allowed is settled honestly anyway, the excess is counted per node
+(`overshoot_tokens`, `overshoot_usd_micros`), audited as `budget.overshoot`, and it immediately
+shrinks the remainder -- so such a provider costs at most one call's excess before the node
+refuses everything and the cost breaker takes over.
 
 When the root node is exhausted, the provider actor stops calling any model at all and answers
 with a deterministic defer: a system-wide cost breaker.
@@ -45,7 +53,14 @@ with a deterministic defer: a system-wide cost breaker.
 - Reserving an upper bound means the budget is used conservatively: a call that turns out cheap
   still held `max_tokens` worth of quota while it ran. With a small budget and high concurrency
   that refuses calls which would have fitted. `max_tokens` per request is the tuning knob.
-- The estimate must be an upper bound, so the token estimator errs high and unknown models are
-  charged at the highest listed price.
+- The estimator errs high on purpose (`agentic/tokens.py`: UTF-8 bytes at 2.5 bytes per token,
+  about 1.6x the familiar four-characters heuristic, because the text being estimated is
+  punctuation-dense canonical JSON), and unknown models are charged at the highest listed price.
+  No character-count heuristic is a true upper bound, however: only the provider's own counter
+  is exact. That is why settlement above a hold is a supported, tested path
+  (`tests/unit/test_provider_actor.py::test_a_provider_that_bills_more_than_it_was_allowed_is_audited_and_cuts_off`)
+  rather than an assumed impossibility, and why the fake providers report modelled usage from a
+  *different* function (`simulate_usage_tokens`) than the one that sizes reservations -- reserving
+  exactly what the fake will report would make the budget result unfalsifiable offline.
 - The ledger is in memory and synchronous (one lock, no `await`), which is what keeps a
   reservation atomic. Making it durable or shared across processes is out of scope (ADR 0003).

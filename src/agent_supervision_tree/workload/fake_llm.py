@@ -31,7 +31,7 @@ from agent_supervision_tree.agentic.providers.base import (
     TextBlock,
     Usage,
 )
-from agent_supervision_tree.agentic.providers.fake import estimate_tokens
+from agent_supervision_tree.agentic.tokens import simulate_usage_tokens
 from agent_supervision_tree.core.canonical import canonical_json
 from agent_supervision_tree.workload.documents import INJECTION_MARKER, POISON_MARKER, parse_invoice
 
@@ -145,7 +145,10 @@ class FaultingFakeProvider:
         parsed = self._answer(text, garbage=roll < profile.p_garbage)
         rendered = json.dumps(parsed) if parsed is not None else "{not json"
         prompt = canonical_json(request.model_dump(mode="json"))
-        usage = Usage(input_tokens=estimate_tokens(prompt), output_tokens=estimate_tokens(rendered))
+        usage = Usage(
+            input_tokens=simulate_usage_tokens(prompt),
+            output_tokens=simulate_usage_tokens(rendered),
+        )
         return LLMResponse(
             model=model, stop_reason="end_turn", text=rendered, parsed=parsed, usage=usage
         )

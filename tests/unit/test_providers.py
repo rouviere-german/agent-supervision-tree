@@ -33,9 +33,9 @@ from agent_supervision_tree.agentic.providers.fake import (
     GullibleInjectionPolicy,
     ScriptedPolicy,
     SeededChoicePolicy,
-    estimate_tokens,
 )
 from agent_supervision_tree.agentic.providers.replay import RecordingProvider, ReplayProvider
+from agent_supervision_tree.agentic.tokens import simulate_usage_tokens
 
 pytestmark = pytest.mark.unit
 
@@ -63,7 +63,7 @@ def test_usage_is_estimated_deterministically() -> None:
     first = FakeProvider(ScriptedPolicy([end("answer")])).complete(request())
     second = FakeProvider(ScriptedPolicy([end("answer")])).complete(request())
     assert first.usage == second.usage
-    assert first.usage.output_tokens == estimate_tokens("answer")
+    assert first.usage.output_tokens == simulate_usage_tokens("answer")
     assert first.usage.input_tokens > 0
 
 

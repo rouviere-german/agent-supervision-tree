@@ -9,9 +9,12 @@ the actual usage (or released on failure). Because reservations are upper bounds
 until settlement, concurrent callers can never overspend a shared ancestor, however many of
 them race: the invariant ``spent + reserved <= limit`` holds at every node at every moment.
 
-Settling above the reserved amount is recorded honestly (spend is never hidden) and counted as
-an overshoot; the provider actor reserves ``input estimate + max_tokens`` so overshoots only
-happen if a provider reports more usage than the request allowed.
+The guarantee the ledger itself can make is that it never *authorizes* more than a limit:
+``spent + reserved - overshoot <= limit`` at every node, at every moment. A provider that
+reports more usage than the request allowed is settled honestly anyway (spend is never hidden),
+the excess is counted per node as an overshoot and audited, and because it still raises
+``spent`` it immediately shrinks what later calls may reserve -- so a lying provider costs at
+most one call's excess before the node refuses everything.
 
 The ledger is synchronous and guarded by a lock, so it is safe from asyncio tasks and from
 threads alike; there is no ``await`` inside a reservation.
@@ -41,6 +44,8 @@ class QuotaNode:
     reserved_usd_micros: int = 0
     spent_tokens: int = 0
     spent_usd_micros: int = 0
+    overshoot_tokens: int = 0
+    overshoot_usd_micros: int = 0
     reservations_total: int = 0
     refusals_total: int = 0
     overshoot_total: int = 0
@@ -55,6 +60,16 @@ class QuotaNode:
         return self.limit_usd_micros - self.spent_usd_micros - self.reserved_usd_micros
 
     @property
+    def authorized_tokens(self) -> int:
+        """Tokens this node ever approved: spend and holds, minus what providers billed over."""
+        return self.spent_tokens + self.reserved_tokens - self.overshoot_tokens
+
+    @property
+    def authorized_usd_micros(self) -> int:
+        """Micro-USD this node ever approved (see :attr:`authorized_tokens`)."""
+        return self.spent_usd_micros + self.reserved_usd_micros - self.overshoot_usd_micros
+
+    @property
     def exhausted(self) -> bool:
         return self.remaining_tokens <= 0 or self.remaining_usd_micros <= 0
 
@@ -67,6 +82,8 @@ class QuotaNode:
             "reserved_usd_micros": self.reserved_usd_micros,
             "spent_tokens": self.spent_tokens,
             "spent_usd_micros": self.spent_usd_micros,
+            "overshoot_tokens": self.overshoot_tokens,
+            "overshoot_usd_micros": self.overshoot_usd_micros,
             "remaining_tokens": self.remaining_tokens,
             "remaining_usd_micros": self.remaining_usd_micros,
             "reservations_total": self.reservations_total,
@@ -151,17 +168,26 @@ class QuotaLedger:
             return Reservation(next(_ids), path, tokens, usd_micros)
 
     def settle(self, reservation: Reservation, *, tokens: int, usd_micros: int) -> bool:
-        """Convert a reservation into spend. Returns False when the spend overshot the hold."""
+        """Convert a reservation into spend. Returns False when the spend overshot the hold.
+
+        The excess of a settlement above its hold is spend the ledger never authorized. It is
+        recorded as such per node, so :meth:`check_invariants` can tell a provider that billed
+        over the request from a ledger that handed out more than a limit.
+        """
         if tokens < 0 or usd_micros < 0:
             raise ValueError("settled amounts must be non-negative")
         with self._lock:
             self._close(reservation)
-            overshoot = tokens > reservation.tokens or usd_micros > reservation.usd_micros
+            excess_tokens = max(0, tokens - reservation.tokens)
+            excess_usd = max(0, usd_micros - reservation.usd_micros)
+            overshoot = bool(excess_tokens or excess_usd)
             for node in self._lineage(reservation.path):
                 node.reserved_tokens -= reservation.tokens
                 node.reserved_usd_micros -= reservation.usd_micros
                 node.spent_tokens += tokens
                 node.spent_usd_micros += usd_micros
+                node.overshoot_tokens += excess_tokens
+                node.overshoot_usd_micros += excess_usd
                 if overshoot:
                     node.overshoot_total += 1
             return not overshoot
@@ -188,17 +214,27 @@ class QuotaLedger:
     def exhausted(self, path: str) -> bool:
         return self.node(path).exhausted
 
+    def overshoots(self) -> list[str]:
+        """Paths where a provider reported more usage than the reservation allowed."""
+        with self._lock:
+            return [node.path for node in self._nodes.values() if node.overshoot_total]
+
     def check_invariants(self) -> list[str]:
-        """Return every violated invariant (empty when the ledger is consistent)."""
+        """Return every violated invariant (empty when the ledger is consistent).
+
+        Spend above a limit that a provider caused by billing over its reservation is *not* a
+        ledger violation: it is reported by :meth:`overshoots`, counted per node and audited by
+        the provider actor. What must never happen is the ledger authorizing it.
+        """
         problems: list[str] = []
         with self._lock:
             for node in self._nodes.values():
                 if node.reserved_tokens < 0 or node.reserved_usd_micros < 0:
                     problems.append(f"{node.path}: negative reservation")
-                if node.spent_tokens + node.reserved_tokens > node.limit_tokens:
-                    problems.append(f"{node.path}: tokens over limit")
-                if node.spent_usd_micros + node.reserved_usd_micros > node.limit_usd_micros:
-                    problems.append(f"{node.path}: usd over limit")
+                if node.authorized_tokens > node.limit_tokens:
+                    problems.append(f"{node.path}: tokens authorized over limit")
+                if node.authorized_usd_micros > node.limit_usd_micros:
+                    problems.append(f"{node.path}: usd authorized over limit")
                 for child_path in node.children:
                     child = self._nodes[child_path]
                     if child.spent_tokens > node.spent_tokens:
