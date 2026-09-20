@@ -79,10 +79,14 @@ twice.
 
 **Budgets.** The quota ledger mirrors the tree. Before a model call a worker reserves an upper
 bound of the cost from its own node *and every ancestor*, atomically; afterwards the reservation
-is settled with the real usage or released. So `spent + reserved <= limit` holds at every node
-however many callers race, and an exhausted root turns into a system-wide cost breaker that
-defers instead of calling a model (ADR
-[0004](docs/adr/0004-reserve-then-settle-hierarchical-budgets.md)).
+is settled with the real usage or released. The ledger therefore never authorizes more than a
+limit, however many callers race, and an exhausted root turns into a system-wide cost breaker
+that defers instead of calling a model (ADR
+[0004](docs/adr/0004-reserve-then-settle-hierarchical-budgets.md)). The estimator that sizes a
+reservation errs high but is a heuristic, not a proof, so the cap on *spend* holds while a
+provider's reported usage stays within its reservation; a provider that bills over it is settled
+honestly, the excess is counted and audited, and it immediately shrinks what the next call may
+reserve.
 
 **Provider.** Workers never call the model directly: they send `llm.call` with a reply future to
 a provider actor that owns a semaphore bulkhead, a closed/open/half-open circuit breaker,
@@ -254,7 +258,9 @@ The controls are enforced by the runtime, not by prompting. Full STRIDE analysis
   is fixed by configuration and checked again inside the handler.
 - **Hierarchical budgets with atomic reservations.** Concurrent workers cannot overspend a shared
   ancestor, billed failures are charged, and an exhausted root switches the whole system to
-  deferring instead of calling any model.
+  deferring instead of calling any model. A provider that reports more usage than its reservation
+  allowed cannot hide it: the excess is counted per node, audited as `budget.overshoot`, and
+  refuses the following call.
 - **Memory DoS.** Mailboxes, message size, the quarantine and the sink's dedupe table are all
   bounded; the ingress sheds with 429 rather than queueing without limit. Overload is measured,
   not assumed (see Results).
@@ -263,7 +269,9 @@ The controls are enforced by the runtime, not by prompting. Full STRIDE analysis
   when `APP_FAULTS_ENABLED` is true *and* a fault-scope key is configured.
 - **Hash-chained audit with redaction.** Restarts, escalations, quarantines, approvals, budget
   refusals, overshoots and fault injections are appended to a hash chain whose data is redacted
-  before it is hashed; `agent-supervision-tree audit verify` checks a chain and its head.
+  before it is hashed. The head and entry count are anchored to `<log>.anchor` as the log grows,
+  and `agent-supervision-tree audit verify` checks both by default, so a truncated or rolled-back
+  log fails closed instead of verifying as a shorter chain.
 
 ## Observability
 

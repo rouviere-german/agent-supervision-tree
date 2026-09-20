@@ -168,9 +168,11 @@ def test_check_invariants_reports_a_ledger_corrupted_by_hand() -> None:
     ledger = build_ledger()
     ledger.node("root/pool/w0").reserved_tokens = -5
     ledger.node("root").spent_tokens = 10_000
+    ledger.node("root").spent_usd_micros = 10_000
     problems = ledger.check_invariants()
     assert any("negative reservation" in problem for problem in problems)
     assert any("tokens authorized over limit" in problem for problem in problems)
+    assert any("usd authorized over limit" in problem for problem in problems)
 
 
 @given(

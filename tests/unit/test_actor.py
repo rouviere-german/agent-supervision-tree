@@ -9,8 +9,15 @@ from functools import partial
 import pytest
 
 import helpers
-from agent_supervision_tree.runtime.actor import ActorRef, ExitReason
+from agent_supervision_tree.runtime.actor import (
+    Actor,
+    ActorContext,
+    ActorRef,
+    ActorRunner,
+    ExitReason,
+)
 from agent_supervision_tree.runtime.errors import (
+    ActorExit,
     ActorNotRunningError,
     MessageFailed,
     QuarantineFullError,
@@ -215,8 +222,6 @@ async def test_in_flight_work_is_quarantined_once_the_attempts_are_used_up() -> 
 
 
 async def test_a_spawned_task_that_fails_crashes_its_actor() -> None:
-    from agent_supervision_tree.runtime.actor import Actor, ActorContext
-
     class Spawner(Actor):
         async def receive(self, envelope: Envelope, ctx: ActorContext) -> None:
             ctx.spawn(self._boom(), name="boom")
@@ -239,8 +244,6 @@ async def test_a_spawned_task_that_fails_crashes_its_actor() -> None:
 
 
 async def test_spawned_tasks_are_cancelled_when_the_actor_exits() -> None:
-    from agent_supervision_tree.runtime.actor import Actor, ActorContext
-
     running: list[asyncio.Task[object]] = []
 
     class Spawner(Actor):
@@ -258,8 +261,6 @@ async def test_spawned_tasks_are_cancelled_when_the_actor_exits() -> None:
 
 
 async def test_a_failing_on_stop_hook_does_not_mask_the_exit_reason() -> None:
-    from agent_supervision_tree.runtime.actor import Actor, ActorContext
-
     class BadStop(Actor):
         async def receive(self, envelope: Envelope, ctx: ActorContext) -> None:
             raise RuntimeError("primary failure")
@@ -440,3 +441,50 @@ async def test_base_exception_crashes_do_not_wedge_the_mailbox_at_zero_credits()
         assert mailbox.try_send(Envelope.create("test.message", {"n": 99}))
     finally:
         await system.stop(timeout=2)
+
+
+async def test_a_keyboard_interrupt_reaches_the_loop_after_the_exit_path_ran() -> None:
+    """An operator's interrupt is not swallowed, but the in-flight message still comes back."""
+    actors: list[BaseCrashingActor] = []
+
+    def factory() -> BaseCrashingActor:
+        actor = BaseCrashingActor(KeyboardInterrupt())
+        actors.append(actor)
+        return actor
+
+    system = build_system([actor_child("hard", factory, capacity=2)])
+    mailbox = system.mailbox("root/hard")
+    envelope = Envelope.create("test.message", {"n": 1})
+    assert mailbox.try_send(envelope)
+    runner = ActorRunner(
+        path="root/hard", factory=factory, mailbox=mailbox, system=system, incarnation=1
+    )
+    with pytest.raises(KeyboardInterrupt):
+        await runner.run()
+    assert [stop.kind for stop in actors[0].stops] == ["error"]
+    assert mailbox.depth == 1  # handed back for the next incarnation, not lost
+    assert mailbox.depth + mailbox.inflight + mailbox.credits == mailbox.capacity
+
+
+async def test_a_keyboard_interrupt_in_on_stop_is_not_swallowed() -> None:
+    """A failing on_stop is only logged -- unless it is the operator's interrupt."""
+
+    class Interrupting(Actor):
+        async def receive(self, envelope: Envelope, ctx: ActorContext) -> None:
+            raise ActorExit
+
+        async def on_stop(self, reason: ExitReason, ctx: ActorContext) -> None:
+            raise KeyboardInterrupt
+
+    system = build_system([actor_child("hard", Interrupting, capacity=2)])
+    mailbox = system.mailbox("root/hard")
+    assert mailbox.try_send(Envelope.create("test.message", {"n": 1}))
+    runner = ActorRunner(
+        path="root/hard",
+        factory=Interrupting,
+        mailbox=mailbox,
+        system=system,
+        incarnation=1,
+    )
+    with pytest.raises(KeyboardInterrupt):
+        await runner.run()

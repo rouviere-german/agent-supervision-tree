@@ -5,9 +5,9 @@ Each node has a token and a micro-USD limit. Before a model call, a child *reser
 bound of what the call may cost; the reservation is checked against the remainder
 (``limit - spent - reserved``) of the node **and every ancestor** and applied to all of them
 atomically, or refused without touching any. After the call the reservation is *settled* with
-the actual usage (or released on failure). Because reservations are upper bounds and are held
-until settlement, concurrent callers can never overspend a shared ancestor, however many of
-them race: the invariant ``spent + reserved <= limit`` holds at every node at every moment.
+the actual usage (or released on failure). Because reservations are held until settlement,
+concurrent callers can never overspend a shared ancestor, however many of them race: no call
+starts unless it fits, whatever the interleaving.
 
 The guarantee the ledger itself can make is that it never *authorizes* more than a limit:
 ``spent + reserved - overshoot <= limit`` at every node, at every moment. A provider that

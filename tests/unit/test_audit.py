@@ -11,6 +11,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from agent_supervision_tree.agentic.audit import (
+    GENESIS_HASH,
     AuditLog,
     anchor_path_for,
     append_anchor,
@@ -294,3 +295,39 @@ def test_verify_cli_uses_the_sibling_anchor_by_default(
     # ... and an operator can still ask for the chain alone.
     assert main(["verify", str(path), "--no-anchor"]) == 0
     assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+def test_an_anchor_of_zero_entries_pins_the_genesis_hash(tmp_path: Path) -> None:
+    path = tmp_path / "audit.jsonl"
+    write_log(path)
+    anchor = anchor_path_for(path)
+    append_anchor(anchor, entries=0, head=GENESIS_HASH)
+    assert verify_file(path, anchor=anchor).ok
+    append_anchor(anchor, entries=0, head="a" * 64)
+    assert not verify_file(path, anchor=anchor).ok
+
+
+def test_blank_lines_in_an_anchor_file_are_skipped(tmp_path: Path) -> None:
+    path = tmp_path / "audit.jsonl"
+    log = write_log(path)
+    anchor = anchor_path_for(path)
+    append_anchor(anchor, entries=5, head=log.head)
+    with anchor.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write("\n")
+    assert [item.entries for item in read_anchors(anchor)] == [5]
+    assert verify_file(path, anchor=anchor).ok
+
+
+def test_an_anchor_record_must_be_an_object(tmp_path: Path) -> None:
+    path = tmp_path / "audit.jsonl"
+    write_log(path)
+    anchor = anchor_path_for(path)
+    anchor.write_text("[1, 2]\n", encoding="utf-8", newline="\n")
+    with pytest.raises(TypeError, match="must be an object"):
+        read_anchors(anchor)
+    assert verify_file(path, anchor=anchor).error == "unreadable anchor file"
+
+
+def test_an_anchor_cannot_record_a_negative_entry_count(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        append_anchor(tmp_path / "audit.jsonl.anchor", entries=-1, head=GENESIS_HASH)

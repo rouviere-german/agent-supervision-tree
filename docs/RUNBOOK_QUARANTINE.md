@@ -94,3 +94,15 @@ curl -sS -H "X-API-Key: $ADMIN_KEY" http://localhost:8000/v1/stats | jq '.stats'
 `posted + denied + quarantined` should equal `accepted` once the queues are idle; that is the
 invariant the delivery bench and the soak job check continuously
 (`bench/bench_supervision.py`, `bench/soak.py`).
+
+Then verify the audit log that recorded the whole incident:
+
+```bash
+uv run agent-supervision-tree audit verify var/audit.jsonl
+```
+
+The command checks the hash chain and, by default, every head recorded in `var/audit.jsonl.anchor`
+against the log's prefix of that length, so a truncated or rolled-back log fails here instead of
+looking clean. `--no-anchor` checks the chain alone, and `--expect-head <hash>` compares against a
+head you kept elsewhere -- which is the only check that survives an attacker who can rewrite both
+files, so ship the head (`/v1/stats`, field `audit_head`) off the box.

@@ -94,7 +94,9 @@ jobs:
       - run: uv sync --frozen
       - run: uv run python bench/bench_baseline.py --check
       # The end-to-end evaluation, sized for a shared runner: the full numbers in the README
-      # come from --schedules 1000 --seconds 5 on the machine named there.
+      # come from --schedules 1000 --seconds 3 on the machine named there. The thresholds this
+      # enforces are the invariants (0 lost, 0 duplicate posts per crashed actor class, 0 over
+      # budget, RSS bound, shedding at 10x), not the throughput figures, which move with load.
       - run: uv run python bench/bench_supervision.py --check --schedules 60 --documents 8 --seconds 2
       - uses: actions/upload-artifact@v4
         if: always()

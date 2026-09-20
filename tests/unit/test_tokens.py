@@ -59,3 +59,5 @@ def test_more_text_never_costs_fewer_tokens(left: str, right: str) -> None:
 def test_the_ratio_must_be_positive() -> None:
     with pytest.raises(ValueError, match="positive"):
         estimate_tokens("hello", bytes_per_token=0)
+    with pytest.raises(ValueError, match="positive"):
+        simulate_usage_tokens("hello", chars_per_token=0)

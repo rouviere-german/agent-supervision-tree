@@ -137,3 +137,25 @@ def test_a_chain_without_a_path_writes_no_anchor(tmp_path: Path) -> None:
     chain.flush()
     chain.close()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_anchor_every_is_validated_and_the_anchor_path_is_exposed(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="anchor_every"):
+        AuditChain(tmp_path / "audit.jsonl", anchor_every=0)
+    assert AuditChain(clock=fixed_clock).anchor_path is None
+    chain = AuditChain(tmp_path / "audit.jsonl", clock=fixed_clock)
+    assert chain.anchor_path == tmp_path / "audit.jsonl.anchor"
+    chain.close()
+
+
+def test_reopening_a_log_drops_the_anchors_of_the_log_it_truncates(tmp_path: Path) -> None:
+    path = tmp_path / "audit.jsonl"
+    first = AuditChain(path, clock=fixed_clock, anchor_every=1)
+    first.append("root", "actor.restarted", {})
+    first.close()
+    assert read_anchors(anchor_path_for(path))
+    second = AuditChain(path, clock=fixed_clock, anchor_every=1)
+    assert read_anchors(anchor_path_for(path)) == []
+    second.append("root", "actor.restarted", {})
+    second.close()
+    assert verify_file(path, anchor=anchor_path_for(path)).ok
