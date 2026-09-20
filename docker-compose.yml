@@ -1,0 +1,44 @@
+# Local stack for the supervision tree. Only locally built images; nothing is pulled at runtime
+# besides the pinned bases. The root filesystem is read-only, so the audit chain stays in memory
+# unless APP_AUDIT_LOG_PATH points into the writable tmpfs at /app/var.
+services:
+  app:
+    build:
+      context: .
+    image: agent-supervision-tree:local
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      APP_ENVIRONMENT: prod
+      APP_LOG_LEVEL: INFO
+      # Comma-separated SHA-256 digests, one list per scope; generate a key with
+      # `uv run agent-supervision-tree generate-api-key`.
+      APP_API_KEY_SHA256: ${APP_API_KEY_SHA256:-}
+      APP_ADMIN_API_KEY_SHA256: ${APP_ADMIN_API_KEY_SHA256:-}
+      APP_FAULT_API_KEY_SHA256: ${APP_FAULT_API_KEY_SHA256:-}
+      # Fault injection is off unless both this flag and a fault-scope key are set.
+      APP_FAULTS_ENABLED: ${APP_FAULTS_ENABLED:-false}
+      # Supervision tree sizing. Mailboxes are the memory bound: workers * worker capacity.
+      APP_WORKERS: ${APP_WORKERS:-4}
+      APP_MAILBOX_CAPACITY: ${APP_MAILBOX_CAPACITY:-64}
+      APP_WORKER_MAILBOX_CAPACITY: ${APP_WORKER_MAILBOX_CAPACITY:-8}
+      APP_MESSAGE_TTL_SECONDS: ${APP_MESSAGE_TTL_SECONDS:-10}
+      # Hierarchical budget for the whole tree.
+      APP_BUDGET_MAX_TOKENS: ${APP_BUDGET_MAX_TOKENS:-2000000}
+      APP_BUDGET_MAX_USD: ${APP_BUDGET_MAX_USD:-5.0}
+      APP_WEBHOOK_URL: ${APP_WEBHOOK_URL:-https://hooks.example.internal/invoices}
+      APP_AUDIT_LOG_PATH: ${APP_AUDIT_LOG_PATH:-}
+      # Without a key the service runs the seeded fault-injecting fake model.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+      - /app/var:size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    restart: unless-stopped
