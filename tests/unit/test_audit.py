@@ -10,7 +10,14 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from agent_supervision_tree.agentic.audit import AuditLog, main, verify_file
+from agent_supervision_tree.agentic.audit import (
+    AuditLog,
+    anchor_path_for,
+    append_anchor,
+    main,
+    read_anchors,
+    verify_file,
+)
 from agent_supervision_tree.agentic.errors import AuditIntegrityError
 from agent_supervision_tree.core.canonical import canonical_json, sha256_hex
 
@@ -208,3 +215,82 @@ def test_verify_cli_exit_codes(tmp_path: Path, capsys: pytest.CaptureFixture[str
     report = json.loads(capsys.readouterr().out)
     assert report["ok"] is False
     assert report["line"] == 2
+
+
+# --- head anchoring -------------------------------------------------------------------------
+
+
+def test_an_anchor_catches_a_truncation_that_the_chain_alone_accepts(tmp_path: Path) -> None:
+    """A truncated tail leaves a self-consistent prefix; only a recorded head notices."""
+    path = tmp_path / "audit.jsonl"
+    log = write_log(path)
+    append_anchor(anchor_path_for(path), entries=5, head=log.head)
+    path.write_text("".join(lines_of(path)[:-2]), encoding="utf-8", newline="\n")
+    assert verify_file(path).ok  # the prefix verifies on its own
+    result = verify_file(path, anchor=anchor_path_for(path))
+    assert not result.ok
+    assert result.error is not None
+    assert "shorter than its anchor" in result.error
+
+
+def test_an_anchor_catches_a_forged_entry_appended_after_the_real_head(tmp_path: Path) -> None:
+    path = tmp_path / "audit.jsonl"
+    log = write_log(path)
+    anchor = anchor_path_for(path)
+    append_anchor(anchor, entries=5, head=log.head)
+    log.append("agent:attacker", "step", {"index": 99, "note": "forged"})
+    assert verify_file(path).ok  # a forged continuation is a valid chain
+    assert verify_file(path, anchor=anchor).ok  # ... and appending is allowed
+    # But rewriting history behind the anchor is not.
+    lines = lines_of(path)
+    path.write_text("".join(lines[:3] + lines[5:]), encoding="utf-8", newline="\n")
+    result = verify_file(path, anchor=anchor)
+    assert not result.ok
+
+
+def test_an_anchor_that_does_not_match_the_prefix_is_a_rewritten_history(tmp_path: Path) -> None:
+    path = tmp_path / "audit.jsonl"
+    write_log(path)
+    anchor = anchor_path_for(path)
+    append_anchor(anchor, entries=3, head="f" * 64)
+    result = verify_file(path, anchor=anchor)
+    assert not result.ok
+    assert result.error is not None
+    assert "anchor mismatch" in result.error
+
+
+def test_anchors_round_trip_and_an_empty_anchor_file_changes_nothing(tmp_path: Path) -> None:
+    path = tmp_path / "audit.jsonl"
+    log = write_log(path)
+    anchor = anchor_path_for(path)
+    assert read_anchors(anchor) == []
+    assert verify_file(path, anchor=anchor).ok
+    append_anchor(anchor, entries=2, head=log.head)
+    assert [(item.entries, item.head) for item in read_anchors(anchor)] == [(2, log.head)]
+
+
+def test_a_corrupt_anchor_file_fails_verification(tmp_path: Path) -> None:
+    path = tmp_path / "audit.jsonl"
+    write_log(path)
+    anchor = anchor_path_for(path)
+    anchor.write_text("not json\n", encoding="utf-8", newline="\n")
+    result = verify_file(path, anchor=anchor)
+    assert not result.ok
+    assert result.error is not None
+    assert "anchor" in result.error
+
+
+def test_verify_cli_uses_the_sibling_anchor_by_default(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "audit.jsonl"
+    log = write_log(path)
+    append_anchor(anchor_path_for(path), entries=5, head=log.head)
+    assert main(["verify", str(path)]) == 0
+    assert json.loads(capsys.readouterr().out)["anchors"] == 1
+    path.write_text("".join(lines_of(path)[:-1]), encoding="utf-8", newline="\n")
+    assert main(["verify", str(path)]) == 1
+    assert json.loads(capsys.readouterr().out)["ok"] is False
+    # ... and an operator can still ask for the chain alone.
+    assert main(["verify", str(path), "--no-anchor"]) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True

@@ -19,7 +19,7 @@ from typing import Any
 
 from pydantic import JsonValue
 
-from agent_supervision_tree.agentic.audit import verify_file
+from agent_supervision_tree.agentic.audit import anchor_path_for, verify_file
 from agent_supervision_tree.runtime.actor import ExitReason
 from agent_supervision_tree.runtime.messages import Envelope
 from agent_supervision_tree.runtime.supervisor import TreeNode
@@ -145,7 +145,7 @@ async def _run(workdir: Path, documents: int, fault_rate: float, seed: int) -> d
     # Fields the closed extraction schema does not have: an obeyed injection would add them.
     allowed_fields = set(Extraction.model_fields)
     leaked = [payload for _, payload in webhook.posts if set(payload) - allowed_fields]
-    chain = verify_file(audit_path)
+    chain = verify_file(audit_path, anchor=anchor_path_for(audit_path))
     return {
         "documents": documents,
         "fault_rate": fault_rate,

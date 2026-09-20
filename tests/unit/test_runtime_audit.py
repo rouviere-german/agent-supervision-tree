@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from agent_supervision_tree.agentic.audit import GENESIS_HASH, verify_file
+from agent_supervision_tree.agentic.audit import (
+    GENESIS_HASH,
+    anchor_path_for,
+    read_anchors,
+    verify_file,
+)
 from agent_supervision_tree.core.canonical import canonical_json
 from agent_supervision_tree.runtime.audit import AuditChain
 
@@ -97,3 +102,38 @@ def test_export_writes_the_retained_entries(tmp_path: Path) -> None:
     path = tmp_path / "exported.jsonl"
     assert chain.export_jsonl(path) == 3
     assert verify_file(path).ok
+
+
+def test_the_chain_anchors_its_head_periodically_and_on_close(tmp_path: Path) -> None:
+    """Truncation and rollback fail closed without an operator remembering --expect-head."""
+    path = tmp_path / "audit.jsonl"
+    chain = AuditChain(path, clock=fixed_clock, anchor_every=3)
+    for index in range(7):
+        chain.append("root", "actor.restarted", {"index": index})
+    anchors = read_anchors(anchor_path_for(path))
+    assert [item.entries for item in anchors] == [3, 6]
+    chain.close()
+    anchors = read_anchors(anchor_path_for(path))
+    assert [item.entries for item in anchors] == [3, 6, 7]
+    assert anchors[-1].head == chain.head
+    assert verify_file(path, anchor=anchor_path_for(path)).ok
+
+
+def test_an_anchored_chain_detects_a_truncated_file(tmp_path: Path) -> None:
+    path = tmp_path / "audit.jsonl"
+    chain = AuditChain(path, clock=fixed_clock, anchor_every=2)
+    for index in range(4):
+        chain.append("root", "actor.restarted", {"index": index})
+    chain.close()
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    path.write_text("".join(lines[:2]), encoding="utf-8", newline="\n")
+    assert verify_file(path).ok
+    assert not verify_file(path, anchor=anchor_path_for(path)).ok
+
+
+def test_a_chain_without_a_path_writes_no_anchor(tmp_path: Path) -> None:
+    chain = AuditChain(clock=fixed_clock)
+    chain.append("root", "actor.restarted", {})
+    chain.flush()
+    chain.close()
+    assert list(tmp_path.iterdir()) == []

@@ -36,7 +36,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from agent_supervision_tree.agentic.audit import verify_file
+from agent_supervision_tree.agentic.audit import anchor_path_for, verify_file
 from agent_supervision_tree.runtime.actor import ExitReason
 from agent_supervision_tree.runtime.errors import ActorNotRunningError
 from agent_supervision_tree.runtime.messages import Envelope
@@ -228,7 +228,7 @@ async def soak(  # noqa: PLR0915 - one linear loop with its setup and its tail
         duplicates = webhook.duplicates
         exit_code = await pipeline.stop(timeout=15.0)
 
-    chain = verify_file(audit_path)
+    chain = verify_file(audit_path, anchor=anchor_path_for(audit_path))
     summary: dict[str, Any] = {
         "driver": "volume" if documents_target else "time",
         "documents_target": float(documents_target),

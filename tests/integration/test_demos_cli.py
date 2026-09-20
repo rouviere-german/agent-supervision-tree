@@ -12,7 +12,12 @@ import pytest
 from opentelemetry import trace as otel_trace
 
 from agent_supervision_tree import cli
-from agent_supervision_tree.agentic.audit import AuditLog, verify_file
+from agent_supervision_tree.agentic.audit import (
+    AuditLog,
+    anchor_path_for,
+    append_anchor,
+    verify_file,
+)
 from agent_supervision_tree.core import tracing
 from agent_supervision_tree.core.security import hash_api_key
 from agent_supervision_tree.workload.demo import render_tree, run_supervision_demo
@@ -80,6 +85,24 @@ def test_cli_audit_verify(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     log.append("root", "actor.restarted", {})
     assert cli.main(["audit", "verify", str(path), "--expect-head", log.head]) == 0
     assert cli.main(["audit", "verify", str(path), "--expect-head", "0" * 64]) == 1
+    capsys.readouterr()
+
+
+def test_cli_audit_verify_uses_the_anchor_by_default(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An anchored log fails closed on truncation without the operator passing a hash."""
+    path = tmp_path / "audit.jsonl"
+    log = AuditLog(path)
+    for index in range(3):
+        log.append("root", "actor.restarted", {"index": index})
+    append_anchor(anchor_path_for(path), entries=3, head=log.head)
+    assert cli.main(["audit", "verify", str(path)]) == 0
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    path.write_text("".join(lines[:1]), encoding="utf-8", newline="\n")
+    assert cli.main(["audit", "verify", str(path)]) == 1
+    assert cli.main(["audit", "verify", str(path), "--no-anchor"]) == 0
+    assert cli.main(["audit", "verify", str(path), "--anchor", str(anchor_path_for(path))]) == 1
     capsys.readouterr()
 
 

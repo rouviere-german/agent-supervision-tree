@@ -3,8 +3,17 @@
 Each line is the canonical JSON of ``{seq, ts, actor, action, data, prev_hash, hash}`` where
 ``hash = sha256(canonical_json(entry without hash))`` and ``prev_hash`` is the previous entry's
 hash (64 zeros for the first). Verification detects edited, deleted, inserted and reordered
-entries and re-encoded lines. Truncating the *tail* leaves a valid shorter chain, so callers that
-need to detect it record the head hash elsewhere and pass ``--expect-head``.
+entries and re-encoded lines. Truncating the *tail* leaves a valid shorter chain, which
+re-hashing the log can never catch, so the head is also recorded outside the log:
+
+* ``--expect-head HASH`` compares the final head with one the caller kept, and
+* an **anchor file** (``<log>.anchor``) records ``{entries, head, ts}`` as the log grows. Every
+  anchor must still match the log's prefix of that length, so truncation, rollback and any
+  rewrite behind the last anchor fail verification without an operator having to remember a
+  hash. Appending past the last anchor stays legal: that is what an append-only log does.
+
+An anchor is only as good as its own storage -- whoever can rewrite both files can make them
+agree again -- which is why the runbook also ships the head off the box (THREAT_MODEL, T1).
 
 Writers take a file lock per append, so several writers (threads, instances or processes) extend
 one chain instead of forking it. A writer also refuses to extend a file that shrank or whose last
@@ -35,16 +44,22 @@ from agent_supervision_tree.core.fileio import file_lock
 from agent_supervision_tree.core.redaction import redact_value
 
 __all__ = [
+    "ANCHOR_SUFFIX",
     "GENESIS_HASH",
+    "Anchor",
     "AuditEntry",
     "AuditLog",
     "VerifyResult",
+    "anchor_path_for",
+    "append_anchor",
     "entry_hash",
     "main",
+    "read_anchors",
     "verify_file",
 ]
 
 GENESIS_HASH = "0" * 64
+ANCHOR_SUFFIX = ".anchor"
 
 
 class AuditEntry(BaseModel):
@@ -74,6 +89,85 @@ class VerifyResult:
     head: str
     error: str | None = None
     line: int | None = None
+    anchors: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class Anchor:
+    """A head published outside the log: it had ``entries`` entries ending in ``head``."""
+
+    entries: int
+    head: str
+    ts: str = ""
+
+
+def anchor_path_for(path: Path) -> Path:
+    """The conventional anchor file for a log: the log's name plus ``.anchor``."""
+    return path.with_name(path.name + ANCHOR_SUFFIX)
+
+
+def append_anchor(
+    path: Path, *, entries: int, head: str, ts: str | None = None, sync: bool = True
+) -> Anchor:
+    """Append one anchor record. The file is append-only and never rewritten."""
+    if entries < 0:
+        raise ValueError("entries must be non-negative")
+    anchor = Anchor(entries, head, ts or datetime.now(UTC).isoformat())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fields = {"entries": entries, "head": head, "ts": anchor.ts}
+    line = (canonical_json(fields) + "\n").encode("utf-8")
+    with file_lock(path), path.open("ab") as handle:
+        handle.write(line)
+        handle.flush()
+        if sync:
+            os.fsync(handle.fileno())
+    return anchor
+
+
+def read_anchors(path: Path) -> list[Anchor]:
+    """Every anchor in the file, oldest first. A missing file has no anchors."""
+    if not path.exists():
+        return []
+    anchors: list[Anchor] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        if not isinstance(record, dict):
+            raise TypeError("an anchor record must be an object")
+        anchors.append(
+            Anchor(int(record["entries"]), str(record["head"]), str(record.get("ts", "")))
+        )
+    return anchors
+
+
+def _head_after(raw: bytes, entries: int) -> str:
+    """The head of an already-verified chain after its first ``entries`` entries."""
+    if entries == 0:
+        return GENESIS_HASH
+    line = raw.split(b"\n")[entries - 1]
+    return str(json.loads(line.decode("utf-8"))["hash"])
+
+
+def _check_anchors(raw: bytes, result: VerifyResult, anchor_path: Path) -> VerifyResult:
+    """Every anchor must match the log's prefix of that length."""
+    try:
+        anchors = read_anchors(anchor_path)
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError, UnicodeDecodeError):
+        return VerifyResult(False, result.entries, result.head, "unreadable anchor file", None)
+    for anchor in anchors:
+        if anchor.entries > result.entries:
+            error = (
+                f"audit log is shorter than its anchor ({result.entries} entries, anchored at "
+                f"{anchor.entries}: truncated or rolled back)"
+            )
+            return VerifyResult(False, result.entries, result.head, error, None, len(anchors))
+        if _head_after(raw, anchor.entries) != anchor.head:
+            error = f"anchor mismatch at entry {anchor.entries} (history was rewritten)"
+            return VerifyResult(
+                False, result.entries, result.head, error, anchor.entries or None, len(anchors)
+            )
+    return VerifyResult(True, result.entries, result.head, None, None, len(anchors))
 
 
 def _verify_chain(raw: bytes, *, prev: str, seq: int) -> VerifyResult:  # noqa: PLR0911
@@ -119,15 +213,26 @@ def _last_line(raw: bytes) -> bytes:
     return raw[raw.rfind(b"\n", 0, len(raw) - 1) + 1 :]
 
 
-def verify_file(path: Path, *, expect_head: str | None = None) -> VerifyResult:
-    """Verify the whole chain. Returns the first failure with its 1-based line number."""
+def verify_file(
+    path: Path, *, expect_head: str | None = None, anchor: Path | None = None
+) -> VerifyResult:
+    """Verify the whole chain, and its anchors when an anchor file is given.
+
+    Returns the first failure with its 1-based line number. ``anchor`` catches what the chain
+    cannot catch by itself: a truncated tail, a rollback, or a rewrite behind an anchored head.
+    """
     if not path.exists():
         return VerifyResult(False, 0, GENESIS_HASH, "audit log not found", None)
-    result = _verify_chain(path.read_bytes(), prev=GENESIS_HASH, seq=0)
-    if result.ok and expect_head is not None and expect_head != result.head:
+    raw = path.read_bytes()
+    result = _verify_chain(raw, prev=GENESIS_HASH, seq=0)
+    if not result.ok:
+        return result
+    if expect_head is not None and expect_head != result.head:
         return VerifyResult(
             False, result.entries, result.head, "head mismatch (truncated or rolled back)", None
         )
+    if anchor is not None:
+        return _check_anchors(raw, result, anchor)
     return result
 
 
@@ -224,20 +329,38 @@ class AuditLog:
             return entry
 
 
+def _resolve_anchor(path: Path, anchor: Path | None, *, no_anchor: bool) -> Path | None:
+    """Anchoring is on by default: the sibling anchor file is used whenever it exists."""
+    if no_anchor:
+        return None
+    if anchor is not None:
+        return anchor
+    sibling = anchor_path_for(path)
+    return sibling if sibling.exists() else None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="audit", description="Hash-chained audit log tools")
     sub = parser.add_subparsers(dest="command", required=True)
     verify = sub.add_parser("verify", help="verify an audit log")
     verify.add_argument("path", type=Path)
     verify.add_argument("--expect-head", default=None, help="expected head hash")
+    verify.add_argument(
+        "--anchor", type=Path, default=None, help="anchor file (default: <log>.anchor)"
+    )
+    verify.add_argument(
+        "--no-anchor", action="store_true", help="verify the chain alone, ignoring any anchor file"
+    )
     args = parser.parse_args(argv)
-    result = verify_file(args.path, expect_head=args.expect_head)
+    anchor = _resolve_anchor(args.path, args.anchor, no_anchor=args.no_anchor)
+    result = verify_file(args.path, expect_head=args.expect_head, anchor=anchor)
     report = {
         "ok": result.ok,
         "entries": result.entries,
         "head": result.head,
         "error": result.error,
         "line": result.line,
+        "anchors": result.anchors,
     }
     sys.stdout.write(json.dumps(report, sort_keys=True) + "\n")
     return 0 if result.ok else 1

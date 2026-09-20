@@ -64,6 +64,8 @@ def main(argv: list[str] | None = None) -> int:
     verify = audit_sub.add_parser("verify", help="verify a hash-chained audit log")
     verify.add_argument("path", type=Path)
     verify.add_argument("--expect-head", default=None)
+    verify.add_argument("--anchor", type=Path, default=None, help="default: <log>.anchor")
+    verify.add_argument("--no-anchor", action="store_true", help="verify the chain alone")
 
     demo = sub.add_parser("demo", help="run the offline fault-injection demo")
     demo.add_argument("--workdir", type=Path, default=Path("var/demo"))
@@ -87,6 +89,10 @@ def main(argv: list[str] | None = None) -> int:
         forwarded = ["verify", str(args.path)]
         if args.expect_head:
             forwarded += ["--expect-head", args.expect_head]
+        if args.anchor is not None:
+            forwarded += ["--anchor", str(args.anchor)]
+        if args.no_anchor:
+            forwarded.append("--no-anchor")
         return audit_main(forwarded)
     return _demo(args.workdir, args.documents, args.fault_rate, args.seed)
 
