@@ -1,0 +1,8 @@
+{
+  "restart_latency": {"p95_ms": {"max": 50}, "p99_ms": {"max": 100}},
+  "delivery": {"lost": {"max": 0}, "duplicate_sink_writes": {"max": 0}},
+  "overload_1x": {"rss_mb": {"max": 300}},
+  "overload_3x": {"rss_mb": {"max": 300}},
+  "overload_10x": {"rss_mb": {"max": 300}, "shed": {"min": 1}},
+  "budget_supervised": {"over_budget_usd_micros": {"max": 0}, "lost": {"max": 0}, "ledger_problems": {"max": 0}}
+}

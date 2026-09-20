@@ -1,0 +1,11 @@
+{
+  "redact_text_1kb": {"p95_us": 3000},
+  "rate_limiter_check": {"p95_us": 50},
+  "llm_request_sha256_10_messages": {"p95_us": 2000},
+  "audit_append_fsync": {"p95_us": 50000},
+  "audit_verify_1000_entries": {"p95_us": 400000},
+  "envelope_create": {"p95_us": 250},
+  "mailbox_send_receive_ack": {"p95_us": 400},
+  "ledger_reserve_settle": {"p95_us": 60},
+  "supervision_decision_one_for_all_8": {"p95_us": 120}
+}
