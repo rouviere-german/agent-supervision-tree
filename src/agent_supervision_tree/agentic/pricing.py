@@ -1,7 +1,7 @@
 """Token pricing used for USD budgets.
 
 Prices are USD per million tokens, which is numerically equal to micro-USD per token. Source: the
-Claude API reference bundled with Claude Code (checked 2026-09). Update them when prices change;
+Anthropic API documentation at docs.anthropic.com (checked 2026-09). Update them when prices change;
 unknown non-fake models are charged at the highest listed price so budgets err on the safe side.
 """
 

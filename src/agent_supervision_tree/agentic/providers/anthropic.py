@@ -1,6 +1,6 @@
 """AnthropicProvider: the live provider, active only when ANTHROPIC_API_KEY is configured.
 
-Request shape (see the Claude API reference bundled with Claude Code):
+Request shape (see the Anthropic API documentation at docs.anthropic.com):
 - ``client.beta.messages.create``, or ``client.beta.messages.stream`` when ``max_tokens`` exceeds
   16K (non-streaming requests that large risk SDK HTTP timeouts). The client timeout defaults to
   the SDK's 10 minutes;
